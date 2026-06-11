@@ -32,6 +32,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT0_TOKEN}
       - BOT_ID=${BOT0_ID}
+      - BOT_INDEX=0
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
@@ -50,6 +51,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT1_TOKEN}
       - BOT_ID=${BOT1_ID}
+      - BOT_INDEX=1
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
@@ -68,6 +70,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT2_TOKEN}
       - BOT_ID=${BOT2_ID}
+      - BOT_INDEX=2
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
@@ -86,6 +89,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT3_TOKEN}
       - BOT_ID=${BOT3_ID}
+      - BOT_INDEX=3
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
@@ -104,6 +108,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT4_TOKEN}
       - BOT_ID=${BOT4_ID}
+      - BOT_INDEX=4
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
