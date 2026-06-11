@@ -1,5 +1,6 @@
 import yt_dlp
 import os
+import hashlib
 from config import config
 
 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
@@ -26,6 +27,14 @@ def _base_opts() -> dict:
     if os.path.exists(COOKIE_FILE):
         opts['cookiefile'] = COOKIE_FILE
     return opts
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def search_youtube(keyword: str, max_results: int = 5) -> list:
@@ -123,6 +132,7 @@ def download_audio(url: str) -> dict:
             'description': (info.get('description') or '')[:500],
             'category': config.DEFAULT_CATEGORY,
             'mime_type': 'audio/mpeg',
+            'sha256': _sha256_file(file_path),
         }
 
 
@@ -145,4 +155,5 @@ def download_video(url: str, format_id: str) -> dict:
             'description': (info.get('description') or '')[:500],
             'category': config.DEFAULT_CATEGORY,
             'mime_type': 'video/mp4',
+            'sha256': _sha256_file(file_path),
         }
