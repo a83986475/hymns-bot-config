@@ -4,45 +4,38 @@
 
 ---
 
-## 📁 服务器目录结构
+## 📁 目录结构
 
 ```
-~/hymns-bot/
-├── docker-compose.yml   # Docker 编排配置
-├── .env                 # 环境变量（不提交）
-└── bot/                 # git clone 到这里
-    ├── bot.py
-    ├── downloader.py
-    ├── uploader.py
-    ├── config.py
-    ├── migrate_sha256.py
-    ├── cookies.txt          # YouTube cookies（不提交）
-    └── yt-dlp.conf
+~/hymns-bot/               ← git clone 到这里
+├── docker-compose.yml
+├── .env               （不提交）
+├── cookies.txt        （不提交）
+├── bot.py
+├── downloader.py
+├── uploader.py
+├── config.py
+├── migrate_sha256.py
+└── yt-dlp.conf
 ```
-
-> 注：`docker-compose.yml` 和 `.env` 放在上层 `~/hymns-bot/`，代码文件 clone 到 `~/hymns-bot/bot/`
 
 ---
 
 ## 🚀 新服务器部署
 
 ```bash
-# 1. 创建目录并克隆代码
-mkdir -p ~/hymns-bot
-git clone https://github.com/a83986475/hymns-bot-config ~/hymns-bot/bot
+# 1. 克隆代码
+git clone https://github.com/a83986475/hymns-bot-config ~/hymns-bot
 
 # 2. 配置环境变量
-cp ~/hymns-bot/bot/.env.example ~/hymns-bot/.env
+cp ~/hymns-bot/.env.example ~/hymns-bot/.env
 nano ~/hymns-bot/.env
 
 # 3. 配置 YouTube cookies
-cp ~/hymns-bot/bot/cookies.example ~/hymns-bot/bot/cookies.txt
-nano ~/hymns-bot/bot/cookies.txt
+cp ~/hymns-bot/cookies.example ~/hymns-bot/cookies.txt
+nano ~/hymns-bot/cookies.txt
 
-# 4. 复制 docker-compose.yml 到上层目录
-cp ~/hymns-bot/bot/docker-compose.yml ~/hymns-bot/
-
-# 5. 启动
+# 4. 启动
 cd ~/hymns-bot
 docker compose up -d
 ```
@@ -67,8 +60,8 @@ docker compose down
 docker compose up -d
 
 # 更新代码后重建
-cd ~/hymns-bot/bot && git pull origin main
-cd ~/hymns-bot && docker compose up -d --build
+cd ~/hymns-bot && git pull origin main
+docker compose up -d --build
 ```
 
 ---
@@ -76,9 +69,9 @@ cd ~/hymns-bot && docker compose up -d --build
 ## 🔄 更新代码
 
 ```bash
-cd ~/hymns-bot/bot
+cd ~/hymns-bot
 git pull https://<GITHUB_TOKEN>@github.com/a83986475/hymns-bot-config.git main
-cd ~/hymns-bot && docker compose restart
+docker compose restart
 ```
 
 ---
@@ -86,7 +79,7 @@ cd ~/hymns-bot && docker compose restart
 ## 🛠 SHA-256 历史数据回写
 
 ```bash
-cd ~/hymns-bot/bot
+cd ~/hymns-bot
 
 # 预览（不写入）
 python3 migrate_sha256.py --dry-run
