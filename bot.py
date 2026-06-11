@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import aiohttp
+from aiohttp import web as aiohttp_web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
@@ -404,6 +405,42 @@ async def _task_poller():
                 logger.warning(f'[{config.BOT_ID}] 轮询异常: {e}')
                 await asyncio.sleep(config.POLL_INTERVAL)
 
+# ──────────────────HTTP 搜索服务（8080）──────────────────
+
+async def _handle_search_http(request: aiohttp_web.Request):
+    token = request.headers.get('X-Admin-Token', '')
+    if token != config.CF_API_KEY:
+        return aiohttp_web.Response(status=401, text='Unauthorized')
+    q = request.rel_url.query.get('q', '').strip()
+    max_r = min(int(request.rel_url.query.get('max', '8')), 10)
+    if len(q) < 2:
+        return aiohttp_web.json_response({'results': []})
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(None, search_youtube, q, max_r)
+        return aiohttp_web.json_response({'results': [
+            {
+                'url':       r['url'],
+                'title':     r['title'],
+                'uploader':  r.get('uploader', ''),
+                'duration':  r.get('duration', 0),
+                'thumbnail': r.get('thumbnail', ''),
+            }
+            for r in results
+        ]})
+    except Exception as e:
+        logger.error(f'HTTP 搜索异常: {e}')
+        return aiohttp_web.json_response({'error': str(e)}, status=500)
+
+async def _start_search_server():
+    app = aiohttp_web.Application()
+    app.router.add_get('/search', _handle_search_http)
+    runner = aiohttp_web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp_web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info('🔍 搜索服务已启动，端口 8080')
+
 # ──────────────────启动──────────────────
 
 async def _auto_refresh_jwt():
@@ -418,6 +455,7 @@ async def _auto_refresh_jwt():
 async def post_init(app):
     asyncio.create_task(_auto_refresh_jwt())
     asyncio.create_task(_task_poller())
+    asyncio.create_task(_start_search_server())
     logger.info(f'🎵 赞美诗 Bot 已启动（{config.BOT_ID}）')
 
 def main():
