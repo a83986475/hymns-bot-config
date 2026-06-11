@@ -25,7 +25,7 @@ services:
       - botnet
 
   hymns-bot-0:
-    build: .
+    build: ./bot
     container_name: hymns-bot-0
     restart: unless-stopped
     env_file: ./.env
@@ -36,7 +36,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     ports:
       - "0.0.0.0:8080:8080"
     depends_on:
@@ -46,7 +46,7 @@ services:
       - botnet
 
   hymns-bot-1:
-    build: .
+    build: ./bot
     container_name: hymns-bot-1
     restart: unless-stopped
     env_file: ./.env
@@ -57,7 +57,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -65,7 +65,7 @@ services:
       - botnet
 
   hymns-bot-2:
-    build: .
+    build: ./bot
     container_name: hymns-bot-2
     restart: unless-stopped
     env_file: ./.env
@@ -76,7 +76,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -84,7 +84,7 @@ services:
       - botnet
 
   hymns-bot-3:
-    build: .
+    build: ./bot
     container_name: hymns-bot-3
     restart: unless-stopped
     env_file: ./.env
@@ -95,7 +95,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -103,7 +103,7 @@ services:
       - botnet
 
   hymns-bot-4:
-    build: .
+    build: ./bot
     container_name: hymns-bot-4
     restart: unless-stopped
     env_file: ./.env
@@ -114,7 +114,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
