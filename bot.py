@@ -407,9 +407,21 @@ async def _task_poller():
 
 # ──────────────────HTTP 搜索服务（8080，仅 bot0）──────────────────
 
+def _check_search_auth(request: aiohttp_web.Request) -> bool:
+    """验证请求身份：支持 CF_API_KEY（内部）或 CF_JWT Bearer Token（前端）"""
+    # 方式1：X-Admin-Token: CF_API_KEY（内部 Worker 调用）
+    if request.headers.get('X-Admin-Token', '') == config.CF_API_KEY:
+        return True
+    # 方式2：Authorization: Bearer <jwt>（前端用户调用，复用 CF_JWT）
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:].strip()
+        if token and token == config.CF_JWT:
+            return True
+    return False
+
 async def _handle_search_http(request: aiohttp_web.Request):
-    token = request.headers.get('X-Admin-Token', '')
-    if token != config.CF_API_KEY:
+    if not _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
     q = request.rel_url.query.get('q', '').strip()
     max_r = min(int(request.rel_url.query.get('max', '8')), 10)
