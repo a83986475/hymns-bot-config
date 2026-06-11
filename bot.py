@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
@@ -244,19 +245,16 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if fmt == 'audio':
                 meta = await loop.run_in_executor(None, download_audio, entry['url'])
             else:
-                # 先获取该视频的格式列表，找到匹配分辨率的 format_id
                 fmts = await loop.run_in_executor(None, get_formats, entry['url'])
                 target_h = int(res)
                 matched = next((f for f in fmts['video_formats'] if f['height'] == target_h), None)
                 if not matched:
-                    # 找最接近的
                     matched = min(fmts['video_formats'], key=lambda f: abs(f['height'] - target_h), default=None)
                 if not matched:
                     failed += 1
                     continue
                 meta = await loop.run_in_executor(None, download_video, entry['url'], matched['format_id'])
 
-            await loop.run_in_executor(None, lambda: None)  # yield
             result = await direct_upload(meta['file_path'], meta)
             try:
                 os.remove(meta['file_path'])
@@ -318,6 +316,96 @@ async def _do_download_and_upload(msg, url: str, metadata: dict, fmt: str, fmt_i
         except Exception:
             pass
 
+# ──────────────────Worker 任务轮询──────────────────
+
+def _worker_headers() -> dict:
+    return {'X-Admin-Token': config.CF_API_KEY, 'Content-Type': 'application/json'}
+
+async def _patch_task(session: aiohttp.ClientSession, task_id: int, **kwargs):
+    url = f"{config.CF_WORKER_URL}/api/bot/tasks/{task_id}"
+    try:
+        async with session.patch(url, json=kwargs, headers=_worker_headers()) as r:
+            if r.status != 200:
+                logger.warning(f'[{config.BOT_ID}] patch task {task_id} failed: {r.status}')
+    except Exception as e:
+        logger.warning(f'[{config.BOT_ID}] patch task {task_id} error: {e}')
+
+async def _execute_task(session: aiohttp.ClientSession, task: dict):
+    task_id = task['id']
+    url = task['url']
+    mode = task.get('mode', 'audio')
+    fmt = task.get('format')
+    category = task.get('category') or config.DEFAULT_CATEGORY
+
+    logger.info(f'[{config.BOT_ID}] 开始任务 #{task_id}: {mode} {url}')
+    loop = asyncio.get_event_loop()
+
+    try:
+        await _patch_task(session, task_id, status='processing', progress='下载中...')
+        if mode == 'video':
+            meta = await loop.run_in_executor(None, download_video, url, fmt)
+        else:
+            meta = await loop.run_in_executor(None, download_audio, url)
+
+        meta['category'] = category
+        size_mb = os.path.getsize(meta['file_path']) / 1024 / 1024
+        await _patch_task(session, task_id, progress=f'上传中（{size_mb:.1f} MB）...')
+
+        result = await direct_upload(meta['file_path'], meta)
+
+        try:
+            os.remove(meta['file_path'])
+        except Exception:
+            pass
+
+        import json
+        await _patch_task(
+            session, task_id,
+            status='done',
+            progress='完成',
+            result=json.dumps({'id': result.get('id'), 'title': meta.get('title', '')}, ensure_ascii=False)
+        )
+        logger.info(f'[{config.BOT_ID}] 任务 #{task_id} 完成，hymn_id={result.get("id")}')
+
+    except Exception as e:
+        logger.exception(f'[{config.BOT_ID}] 任务 #{task_id} 失败')
+        try:
+            os.remove(meta['file_path'])
+        except Exception:
+            pass
+        await _patch_task(session, task_id, status='failed', error=str(e)[:500])
+
+async def _task_poller():
+    if not config.CF_WORKER_URL or not config.CF_API_KEY:
+        logger.warning(f'[{config.BOT_ID}] CF_WORKER_URL 或 CF_API_KEY 未配置，任务轮询已禁用')
+        return
+
+    logger.info(f'[{config.BOT_ID}] 任务轮询已启动，间隔 {config.POLL_INTERVAL}s')
+    poll_url = f"{config.CF_WORKER_URL}/api/bot/tasks/poll"
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.post(
+                    poll_url,
+                    json={'bot_id': config.BOT_ID},
+                    headers=_worker_headers()
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        task = data.get('task')
+                        if task:
+                            asyncio.create_task(_execute_task(session, task))
+                        await asyncio.sleep(0.5 if task else config.POLL_INTERVAL)
+                    else:
+                        logger.warning(f'[{config.BOT_ID}] poll 失败: {resp.status}')
+                        await asyncio.sleep(config.POLL_INTERVAL)
+            except Exception as e:
+                logger.warning(f'[{config.BOT_ID}] 轮询异常: {e}')
+                await asyncio.sleep(config.POLL_INTERVAL)
+
+# ──────────────────启动──────────────────
+
 async def _auto_refresh_jwt():
     while True:
         try:
@@ -329,7 +417,8 @@ async def _auto_refresh_jwt():
 
 async def post_init(app):
     asyncio.create_task(_auto_refresh_jwt())
-    logger.info('🎵 赞美诗 Bot 已启动（直连模式）')
+    asyncio.create_task(_task_poller())
+    logger.info(f'🎵 赞美诗 Bot 已启动（{config.BOT_ID}）')
 
 def main():
     app = (
