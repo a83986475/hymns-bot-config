@@ -407,21 +407,36 @@ async def _task_poller():
 
 # ──────────────────HTTP 搜索服务（8080，仅 bot0）──────────────────
 
-def _check_search_auth(request: aiohttp_web.Request) -> bool:
-    """验证请求身份：支持 CF_API_KEY（内部）或 CF_JWT Bearer Token（前端）"""
+async def _verify_jwt_with_backend(token: str) -> bool:
+    """转发 token 到后端 /api/admin/me 验证是否有效"""
+    if not config.CF_WORKER_URL or not token:
+        return False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{config.CF_WORKER_URL}/api/admin/me",
+                headers={'Authorization': f'Bearer {token}'},
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logger.warning(f'验证 JWT 异常: {e}')
+        return False
+
+async def _check_search_auth(request: aiohttp_web.Request) -> bool:
+    """验证请求身份：支持 CF_API_KEY（内部）或 JWT Bearer Token（前端用户）"""
     # 方式1：X-Admin-Token: CF_API_KEY（内部 Worker 调用）
     if request.headers.get('X-Admin-Token', '') == config.CF_API_KEY:
         return True
-    # 方式2：Authorization: Bearer <jwt>（前端用户调用，复用 CF_JWT）
+    # 方式2：Authorization: Bearer <jwt>（前端用户，转发后端验证）
     auth = request.headers.get('Authorization', '')
     if auth.startswith('Bearer '):
         token = auth[7:].strip()
-        if token and token == config.CF_JWT:
-            return True
+        return await _verify_jwt_with_backend(token)
     return False
 
 async def _handle_search_http(request: aiohttp_web.Request):
-    if not _check_search_auth(request):
+    if not await _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
     q = request.rel_url.query.get('q', '').strip()
     max_r = min(int(request.rel_url.query.get('max', '8')), 10)
