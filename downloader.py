@@ -12,6 +12,7 @@ def _base_opts() -> dict:
     opts = {
         'quiet': True,
         'no_warnings': True,
+        'js_runtimes': ['node'],
         'extractor_args': {
             'youtube': {
                 'player_client': ['web', 'mweb'],
