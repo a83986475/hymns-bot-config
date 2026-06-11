@@ -6,14 +6,15 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
 )
 from config import config
-from downloader import search_youtube, get_formats, download_audio, download_video
+from downloader import search_youtube, get_formats, get_playlist_info, download_audio, download_video
 from uploader import direct_upload, refresh_jwt
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-search_cache: dict = {}   # uid -> [results]
-format_cache: dict = {}   # uid -> {url, formats_info}
+search_cache:   dict = {}   # uid -> [results]
+format_cache:   dict = {}   # uid -> {url, formats_info}
+playlist_cache: dict = {}   # uid -> {entries, title, count}
 
 def is_admin(user_id: int) -> bool:
     return not config.ADMIN_IDS or user_id in config.ADMIN_IDS
@@ -30,8 +31,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*/search* `关键词` — 搜索并列出候选\n"
         "*/auto* `关键词` — 自动下载第一个（音频）\n"
         "*/add* `URL` — 直接上传指定链接\n"
+        "*/playlist* `URL` — 下载整个播放列表\n"
         "*/category* `关键词` `分类` — 指定分类上传\n\n"
-        "分类：`诗歌音频` `歌谱乐谱` `歌词文本` `教程资料`",
+        "分类：`诗歌音频` `歌谱乐谱` `歌词文本` `教程资料` `油管上传`",
         parse_mode='Markdown'
     )
 
@@ -96,6 +98,41 @@ async def cmd_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _do_download_and_upload(msg, results[0]['url'], {'category': category}, 'audio', None)
     except Exception as e:
         await msg.edit_text(f'❌ 失败：{e}')
+
+async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args:
+        await update.effective_message.reply_text('用法：/playlist https://youtube.com/playlist?list=...'); return
+    url = ctx.args[0]
+    uid = update.effective_user.id
+    msg = await update.effective_message.reply_text('🔍 正在解析播放列表...')
+    loop = asyncio.get_event_loop()
+    try:
+        info = await loop.run_in_executor(None, get_playlist_info, url)
+    except Exception as e:
+        await msg.edit_text(f'❌ 解析失败：{e}'); return
+
+    if not info['entries']:
+        await msg.edit_text('❌ 播放列表为空'); return
+
+    playlist_cache[uid] = info
+    total_dur = fmt_dur(info['total_duration'])
+
+    buttons = [
+        [InlineKeyboardButton('🎵 全部音频 MP3', callback_data=f'pl:{uid}:audio:0')],
+        [InlineKeyboardButton('🎬 全部视频 360p', callback_data=f'pl:{uid}:video:360')],
+        [InlineKeyboardButton('🎬 全部视频 480p', callback_data=f'pl:{uid}:video:480')],
+        [InlineKeyboardButton('🎬 全部视频 720p', callback_data=f'pl:{uid}:video:720')],
+        [InlineKeyboardButton('🎬 全部视频 1080p', callback_data=f'pl:{uid}:video:1080')],
+    ]
+    await msg.edit_text(
+        f"📋 *{info['title']}*\n"
+        f"🎵 共 {info['count']} 个视频\n"
+        f"⏱ 总时长：{total_dur}\n\n"
+        f"请选择下载格式：",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode='Markdown'
+    )
 
 # ──────────────────格式选择──────────────────
 
@@ -174,6 +211,70 @@ async def callback_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await _do_download_and_upload(query.message, url, {}, fmt, fmt_id if fmt == 'video' else None)
 
+async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(':')
+    uid, fmt, res = int(parts[1]), parts[2], parts[3]
+
+    if uid not in playlist_cache:
+        await query.edit_message_text('❌ 缓存已过期，请重新发送链接'); return
+
+    info = playlist_cache[uid]
+    entries = info['entries']
+    total = len(entries)
+
+    await query.edit_message_text(
+        f"⬇️ 开始下载播放列表：*{info['title']}*\n"
+        f"共 {total} 个，格式：{'音频 MP3' if fmt == 'audio' else f'视频 {res}p'}\n"
+        f"进度：0/{total}",
+        parse_mode='Markdown'
+    )
+
+    success, failed = 0, 0
+    loop = asyncio.get_event_loop()
+
+    for i, entry in enumerate(entries, 1):
+        try:
+            await query.edit_message_text(
+                f"⬇️ *{info['title']}*\n"
+                f"进度：{i}/{total} — {entry['title'][:40]}",
+                parse_mode='Markdown'
+            )
+            if fmt == 'audio':
+                meta = await loop.run_in_executor(None, download_audio, entry['url'])
+            else:
+                # 先获取该视频的格式列表，找到匹配分辨率的 format_id
+                fmts = await loop.run_in_executor(None, get_formats, entry['url'])
+                target_h = int(res)
+                matched = next((f for f in fmts['video_formats'] if f['height'] == target_h), None)
+                if not matched:
+                    # 找最接近的
+                    matched = min(fmts['video_formats'], key=lambda f: abs(f['height'] - target_h), default=None)
+                if not matched:
+                    failed += 1
+                    continue
+                meta = await loop.run_in_executor(None, download_video, entry['url'], matched['format_id'])
+
+            await loop.run_in_executor(None, lambda: None)  # yield
+            result = await direct_upload(meta['file_path'], meta)
+            try:
+                os.remove(meta['file_path'])
+            except Exception:
+                pass
+            success += 1
+        except Exception as e:
+            logger.error(f'播放列表第{i}项失败：{e}')
+            failed += 1
+
+    await query.edit_message_text(
+        f"✅ *播放列表下载完成*\n\n"
+        f"📋 {info['title']}\n"
+        f"✅ 成功：{success}\n"
+        f"❌ 失败：{failed}",
+        parse_mode='Markdown'
+    )
+
 # ──────────────────核心逻辑──────────────────
 
 async def _do_download_and_upload(msg, url: str, metadata: dict, fmt: str, fmt_id):
@@ -246,8 +347,10 @@ def main():
     app.add_handler(CommandHandler('auto',     cmd_auto))
     app.add_handler(CommandHandler('add',      cmd_add))
     app.add_handler(CommandHandler('category', cmd_category))
-    app.add_handler(CallbackQueryHandler(callback_pick,   pattern=r'^pick:'))
-    app.add_handler(CallbackQueryHandler(callback_format, pattern=r'^fmt:'))
+    app.add_handler(CommandHandler('playlist', cmd_playlist))
+    app.add_handler(CallbackQueryHandler(callback_pick,     pattern=r'^pick:'))
+    app.add_handler(CallbackQueryHandler(callback_format,   pattern=r'^fmt:'))
+    app.add_handler(CallbackQueryHandler(callback_playlist, pattern=r'^pl:'))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
