@@ -3,7 +3,7 @@ import logging
 import os
 import aiohttp
 from aiohttp import web as aiohttp_web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
 )
@@ -425,10 +425,8 @@ async def _verify_jwt_with_backend(token: str) -> bool:
 
 async def _check_search_auth(request: aiohttp_web.Request) -> bool:
     """验证请求身份：支持 CF_API_KEY（内部）或 JWT Bearer Token（前端用户）"""
-    # 方式1：X-Admin-Token: CF_API_KEY（内部 Worker 调用）
     if request.headers.get('X-Admin-Token', '') == config.CF_API_KEY:
         return True
-    # 方式2：Authorization: Bearer <jwt>（前端用户，转发后端验证）
     auth = request.headers.get('Authorization', '')
     if auth.startswith('Bearer '):
         token = auth[7:].strip()
@@ -485,9 +483,17 @@ async def _auto_refresh_jwt():
 async def post_init(app):
     asyncio.create_task(_auto_refresh_jwt())
     asyncio.create_task(_task_poller())
-    # 只有 bot0 启动搜索服务，避免多容器争抢同一端口
     if config.BOT_ID == 'bot0':
         asyncio.create_task(_start_search_server())
+    # 注册指令菜单（覆盖式，重复执行无副作用）
+    await app.bot.set_my_commands([
+        BotCommand('start',    '查看帮助'),
+        BotCommand('search',   '搜索 YouTube 视频'),
+        BotCommand('auto',     '自动下载第一个结果（音频）'),
+        BotCommand('add',      '直接上传指定链接'),
+        BotCommand('playlist', '下载整个播放列表'),
+        BotCommand('category', '指定分类上传'),
+    ])
     logger.info(f'🎵 赞美诗 Bot 已启动（{config.BOT_ID}）')
 
 def main():
