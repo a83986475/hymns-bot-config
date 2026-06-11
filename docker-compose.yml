@@ -1,0 +1,48 @@
+services:
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TG_API_ID}
+      TELEGRAM_API_HASH: ${TG_API_HASH}
+      TELEGRAM_LOCAL: 1
+    volumes:
+      - tg-api-data:/var/lib/telegram-bot-api
+    ports:
+      - "127.0.0.1:8081:8081"
+    networks:
+      - botnet
+
+  bgutil-ytdlp-pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: bgutil-ytdlp-pot-provider
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4416:4416"
+    networks:
+      - botnet
+
+  hymns-bot:
+    build: .
+    container_name: hymns-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /tmp/hymns:/tmp/hymns
+      - .:/app
+    environment:
+      - TZ=Asia/Shanghai
+    depends_on:
+      - telegram-bot-api
+      - bgutil-ytdlp-pot-provider
+    networks:
+      - botnet
+
+networks:
+  botnet:
+    driver: bridge
+
+volumes:
+  tg-api-data:
