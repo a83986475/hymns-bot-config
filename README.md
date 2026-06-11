@@ -4,28 +4,31 @@
 
 ---
 
-## 📁 目录结构
+## 📁 服务器目录结构
 
 ```
 ~/hymns-bot/
 ├── docker-compose.yml   # Docker 编排配置
 ├── .env                 # 环境变量（不提交）
-└── bot/                 # 代码目录（git clone 到这里）
+└── bot/                 # git clone 到这里
     ├── bot.py
     ├── downloader.py
     ├── uploader.py
     ├── config.py
     ├── migrate_sha256.py
-    ├── cookies.txt       # YouTube cookies（不提交）
+    ├── cookies.txt          # YouTube cookies（不提交）
     └── yt-dlp.conf
 ```
+
+> 注：`docker-compose.yml` 和 `.env` 放在上层 `~/hymns-bot/`，代码文件 clone 到 `~/hymns-bot/bot/`
 
 ---
 
 ## 🚀 新服务器部署
 
 ```bash
-# 1. 克隆代码
+# 1. 创建目录并克隆代码
+mkdir -p ~/hymns-bot
 git clone https://github.com/a83986475/hymns-bot-config ~/hymns-bot/bot
 
 # 2. 配置环境变量
@@ -34,9 +37,12 @@ nano ~/hymns-bot/.env
 
 # 3. 配置 YouTube cookies
 cp ~/hymns-bot/bot/cookies.example ~/hymns-bot/bot/cookies.txt
-nano ~/hymns-bot/bot/cookies.txt  # 填入实际 cookies
+nano ~/hymns-bot/bot/cookies.txt
 
-# 4. 启动
+# 4. 复制 docker-compose.yml 到上层目录
+cp ~/hymns-bot/bot/docker-compose.yml ~/hymns-bot/
+
+# 5. 启动
 cd ~/hymns-bot
 docker compose up -d
 ```
@@ -51,7 +57,7 @@ cd ~/hymns-bot && docker compose ps
 
 # 查看日志
 docker compose logs -f
-docker compose logs -f hymns-bot-0   # 单个容器
+docker compose logs -f hymns-bot-0
 
 # 重启
 docker compose restart
@@ -99,7 +105,7 @@ python3 migrate_sha256.py --limit 100
 | 指令 | 说明 |
 |------|------|
 | `/search 关键词` | 搜索 YouTube 并列出候选 |
-| `/auto 关键词` | 自动下载第一个（音频）|
+| `/auto 关键词` | 自动下载第一个（音频） |
 | `/add URL` | 直接上传指定链接 |
 | `/playlist URL` | 下载整个播放列表 |
 | `/category 关键词 分类` | 指定分类上传 |
