@@ -12,6 +12,7 @@ def _base_opts() -> dict:
     opts = {
         'quiet': True,
         'no_warnings': True,
+        'noplaylist': True,
         'js_runtimes': {'node': {}},
         'extractor_args': {
             'youtube': {
@@ -69,6 +70,33 @@ def get_formats(url: str) -> dict:
         'uploader': info.get('uploader', ''),
         'description': (info.get('description') or '')[:500],
         'video_formats': video_formats,
+    }
+
+
+def get_playlist_info(url: str) -> dict:
+    ydl_opts = {
+        **_base_opts(),
+        'extract_flat': True,
+        'noplaylist': False,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    entries = info.get('entries', [])
+    total_duration = sum(e.get('duration') or 0 for e in entries)
+    return {
+        'title': info.get('title', ''),
+        'count': len(entries),
+        'total_duration': total_duration,
+        'entries': [
+            {
+                'index': i + 1,
+                'title': e.get('title', '未知'),
+                'url': f"https://youtube.com/watch?v={e.get('id')}",
+                'duration': e.get('duration', 0),
+            }
+            for i, e in enumerate(entries)
+        ],
     }
 
 
