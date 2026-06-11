@@ -1,0 +1,9 @@
+# Netscape HTTP Cookie File
+# 从浏览器导出 YouTube cookies，保存为 cookies.txt 放到本文件同目录
+# 推荐使用 Chrome 插件 "Get cookies.txt LOCALLY" 导出
+#
+# 格式示例：
+# .youtube.com	TRUE	/	TRUE	1700000000	CONSENT	YES+
+# .youtube.com	TRUE	/	TRUE	1700000000	__Secure-1PSID	xxxxxx
+#
+# 导出后重命名为 cookies.txt，路径对应容器内 /app/cookies.txt
