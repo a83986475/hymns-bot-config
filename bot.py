@@ -405,7 +405,7 @@ async def _task_poller():
                 logger.warning(f'[{config.BOT_ID}] 轮询异常: {e}')
                 await asyncio.sleep(config.POLL_INTERVAL)
 
-# ──────────────────HTTP 搜索服务（8080）──────────────────
+# ──────────────────HTTP 搜索服务（8080，仅 bot0）──────────────────
 
 async def _handle_search_http(request: aiohttp_web.Request):
     token = request.headers.get('X-Admin-Token', '')
@@ -433,13 +433,16 @@ async def _handle_search_http(request: aiohttp_web.Request):
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
 async def _start_search_server():
-    app = aiohttp_web.Application()
-    app.router.add_get('/search', _handle_search_http)
-    runner = aiohttp_web.AppRunner(app)
-    await runner.setup()
-    site = aiohttp_web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    logger.info('🔍 搜索服务已启动，端口 8080')
+    try:
+        app = aiohttp_web.Application()
+        app.router.add_get('/search', _handle_search_http)
+        runner = aiohttp_web.AppRunner(app)
+        await runner.setup()
+        site = aiohttp_web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        logger.info('🔍 搜索服务已启动，端口 8080')
+    except Exception as e:
+        logger.error(f'🔍 搜索服务启动失败: {e}')
 
 # ──────────────────启动──────────────────
 
@@ -455,7 +458,9 @@ async def _auto_refresh_jwt():
 async def post_init(app):
     asyncio.create_task(_auto_refresh_jwt())
     asyncio.create_task(_task_poller())
-    asyncio.create_task(_start_search_server())
+    # 只有 bot0 启动搜索服务，避免多容器争抢同一端口
+    if config.BOT_ID == 'bot0':
+        asyncio.create_task(_start_search_server())
     logger.info(f'🎵 赞美诗 Bot 已启动（{config.BOT_ID}）')
 
 def main():
