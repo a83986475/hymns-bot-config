@@ -19,7 +19,7 @@ def _admin_headers() -> dict:
         "Authorization":  f"Bearer {config.CF_JWT}",
     }
 
-async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str) -> dict:
+async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str, bot_index: int = 0) -> dict:
     payload = {
         "title":       metadata.get("title", fname),
         "category":    metadata.get("category", config.DEFAULT_CATEGORY),
@@ -30,6 +30,7 @@ async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str)
         "mime_type":   "audio/mpeg",
         "file_id":     file_id,
         "folder_id":   metadata.get("folder_id"),
+        "bot_index":   bot_index,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -60,17 +61,17 @@ async def direct_upload(file_path: str, metadata: dict) -> dict:
                     "chat_id":   config.STORAGE_CHAT_ID,
                     "title":     metadata.get("title", fname),
                     "performer": metadata.get("artist", ""),
-                    "caption":   f"🎵 {metadata.get('title', fname)}",
+                    "caption":   f"\U0001f3b5 {metadata.get('title', fname)}",
                 },
                 files={"audio": (fname, f, "audio/mpeg")}
             )
     resp.raise_for_status()
     data = resp.json()
     if not data.get("ok"):
-        raise Exception(f"TG 上传失败：{data.get('description', 'unknown error')}")
+        raise Exception(f"TG \u4e0a\u4f20\u5931\u8d25\uff1a{data.get('description', 'unknown error')}")
 
     audio   = data["result"]["audio"]
     file_id = audio["file_id"]
     tg_size = audio.get("file_size", file_size)
 
-    return await _post_import(metadata, file_id, tg_size, fname)
+    return await _post_import(metadata, file_id, tg_size, fname, bot_index=config.BOT_INDEX)
