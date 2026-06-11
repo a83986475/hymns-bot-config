@@ -6,6 +6,7 @@ load_dotenv()
 @dataclass
 class Config:
     BOT_TOKEN:        str  = os.getenv("BOT_TOKEN", "")
+    BOT_INDEX:        int  = int(os.getenv("BOT_INDEX", "0"))  # 对应 Worker BOT_POOL 下标
     CF_WORKER_URL:    str  = os.getenv("CF_WORKER_URL", "")
     CF_API_KEY:       str  = os.getenv("CF_API_KEY", "")
     CF_JWT:           str  = os.getenv("CF_JWT", "")
