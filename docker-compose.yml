@@ -25,7 +25,7 @@ services:
       - botnet
 
   hymns-bot-0:
-    build: ./bot
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-0
     restart: unless-stopped
     env_file: ./.env
@@ -46,7 +46,7 @@ services:
       - botnet
 
   hymns-bot-1:
-    build: ./bot
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-1
     restart: unless-stopped
     env_file: ./.env
@@ -65,7 +65,7 @@ services:
       - botnet
 
   hymns-bot-2:
-    build: ./bot
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-2
     restart: unless-stopped
     env_file: ./.env
@@ -84,7 +84,7 @@ services:
       - botnet
 
   hymns-bot-3:
-    build: ./bot
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-3
     restart: unless-stopped
     env_file: ./.env
@@ -103,7 +103,7 @@ services:
       - botnet
 
   hymns-bot-4:
-    build: ./bot
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-4
     restart: unless-stopped
     env_file: ./.env
