@@ -7,8 +7,6 @@ SHA-256 历史数据回写迁移脚本
   2. preferred bot  + 本地容器
   3. 其他 bot[0]  + 公共 api.telegram.org
   4. 其他 bot[0]  + 本地容器
-  5. 其他 bot[1]  + 公共 api.telegram.org
-  6. 其他 bot[1]  + 本地容器
   ... 以此类推
 """
 
@@ -97,7 +95,7 @@ async def _try_download(
     token: str,
     file_id: str
 ) -> Optional[str]:
-    """尝试 getFile 并验证下载 URL 可用（HEAD 请求确认），返回可用 URL"""
+    """getFile + HEAD 验证，返回可用的下载 URL"""
     try:
         async with session.get(
             f'{base}/bot{token}/getFile',
@@ -109,7 +107,6 @@ async def _try_download(
                 return None
             url = f'{base}/file/bot{token}/{data["result"]["file_path"]}'
 
-        # HEAD 确认该 URL 真实可下载
         async with session.head(
             url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=True
         ) as head:
@@ -125,11 +122,7 @@ async def _fetch_file_url(
     file_id: str,
     preferred_bot_index: int
 ) -> Optional[str]:
-    """
-    对每个 bot，先试公共 API，再试本地容器。
-    preferred bot 排在最前。
-    """
-    # 构建尝试顺序：preferred 排在最前
+    """preferred bot 排首，对每个 bot 先公共 API 再本地容器"""
     ordered: list[tuple[int, str]] = []
     preferred = _get_bot_token(preferred_bot_index)
     if preferred:
@@ -139,18 +132,16 @@ async def _fetch_file_url(
             ordered.append((idx, token))
 
     for bot_idx, token in ordered:
-        # 先公共 API
         url = await _try_download(session, TG_PUBLIC_BASE, token, file_id)
         if url:
-            logger.debug(f'  公共API bot{bot_idx} 找到 {file_id[:16]}...')
+            logger.debug(f'  公共API bot{bot_idx} OK: {file_id[:16]}...')
             return url
-        # 再本地容器
         url = await _try_download(session, TG_LOCAL_BASE, token, file_id)
         if url:
-            logger.debug(f'  本地 bot{bot_idx} 找到 {file_id[:16]}...')
+            logger.debug(f'  本地 bot{bot_idx} OK: {file_id[:16]}...')
             return url
 
-    logger.warning(f'  所有 bot + 所有源均失败: {file_id[:20]}...')
+    logger.warning(f'  所有尝试均失败: {file_id[:20]}...')
     return None
 
 
@@ -232,9 +223,9 @@ async def process_record(
     rec: dict, dry_run: bool, sem: asyncio.Semaphore
 ):
     async with sem:
-        table      = rec['table']
-        rec_id     = rec['id']
-        file_name  = rec.get('file_name', '')
+        table     = rec['table']
+        rec_id    = rec['id']
+        file_name = rec.get('file_name', '')
         try:
             parts = json.loads(rec.get('file_parts', '[]'))
         except Exception:
@@ -263,8 +254,9 @@ async def process_record(
             return
 
         ok = await _update_sha256(session, table, rec_id, sha256, dry_run)
+        icon = '✅' if ok else '❌'
         tag = '(dry-run)' if dry_run else ''
-        logger.info(f'  {"\u2705" if ok else "\u274c"} [{table}#{rec_id}] {sha256[:16]}... {tag}')
+        logger.info(f'  {icon} [{table}#{rec_id}] {sha256[:16]}... {tag}')
 
 
 async def main(dry_run: bool, limit: int, concurrency: int):
@@ -275,7 +267,7 @@ async def main(dry_run: bool, limit: int, concurrency: int):
         logger.error('未找到任何有效 Bot token')
         sys.exit(1)
 
-    logger.info(f'已加载 {len(_VALID_TOKENS)} 个 Bot: {[f"bot{i}" for i, _ in _VALID_TOKENS]}')
+    logger.info(f'已加载 {len(_VALID_TOKENS)} 个 Bot: {["bot" + str(i) for i, _ in _VALID_TOKENS]}')
     logger.info(f'公共API: {TG_PUBLIC_BASE} | 本地: {TG_LOCAL_BASE}')
 
     connector = aiohttp.TCPConnector(limit=concurrency * 4)
