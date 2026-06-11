@@ -25,7 +25,7 @@ def fmt_dur(seconds) -> str:
 # ──────────────────命令──────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "🎵 *赞美诗资源机器人*\n\n"
         "*/search* `关键词` — 搜索并列出候选\n"
         "*/auto* `关键词` — 自动下载第一个（音频）\n"
@@ -38,9 +38,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
-        await update.message.reply_text('用法：/search 奇异恩典'); return
+        await update.effective_message.reply_text('用法：/search 奇异恩典'); return
     keyword = ' '.join(ctx.args)
-    msg = await update.message.reply_text(f'🔍 搜索中：{keyword}...')
+    msg = await update.effective_message.reply_text(f'🔍 搜索中：{keyword}...')
     try:
         results = search_youtube(keyword, max_results=5)
         if not results:
@@ -65,9 +65,9 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
-        await update.message.reply_text('用法：/auto 奇异恩典'); return
+        await update.effective_message.reply_text('用法：/auto 奇异恩典'); return
     keyword = ' '.join(ctx.args)
-    msg = await update.message.reply_text(f'⚡ 自动处理：{keyword}...')
+    msg = await update.effective_message.reply_text(f'⚡ 自动处理：{keyword}...')
     try:
         results = search_youtube(keyword, max_results=1)
         if not results:
@@ -79,16 +79,16 @@ async def cmd_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
-        await update.message.reply_text('用法：/add https://youtube.com/...'); return
-    await _show_format_picker(update.message, ctx.args[0], update.effective_user.id)
+        await update.effective_message.reply_text('用法：/add https://youtube.com/...'); return
+    await _show_format_picker(update.effective_message, ctx.args[0], update.effective_user.id)
 
 async def cmd_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if len(ctx.args) < 2:
-        await update.message.reply_text('用法：/category 奇异恩典 诗歌音频'); return
+        await update.effective_message.reply_text('用法：/category 奇异恩典 诗歌音频'); return
     category = ctx.args[-1]
     keyword = ' '.join(ctx.args[:-1])
-    msg = await update.message.reply_text(f'⚡ 搜索「{category}」：{keyword}...')
+    msg = await update.effective_message.reply_text(f'⚡ 搜索「{category}」：{keyword}...')
     try:
         results = search_youtube(keyword, max_results=1)
         if not results:
