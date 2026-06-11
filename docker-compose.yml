@@ -25,10 +25,10 @@ services:
       - botnet
 
   hymns-bot-0:
-    build: .
+    build: ./bot
     container_name: hymns-bot-0
     restart: unless-stopped
-    env_file: .env
+    env_file: ./bot/.env
     environment:
       - BOT_TOKEN=${BOT0_TOKEN}
       - BOT_ID=${BOT0_ID}
@@ -36,7 +36,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -44,10 +44,10 @@ services:
       - botnet
 
   hymns-bot-1:
-    build: .
+    build: ./bot
     container_name: hymns-bot-1
     restart: unless-stopped
-    env_file: .env
+    env_file: ./bot/.env
     environment:
       - BOT_TOKEN=${BOT1_TOKEN}
       - BOT_ID=${BOT1_ID}
@@ -55,7 +55,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -63,10 +63,10 @@ services:
       - botnet
 
   hymns-bot-2:
-    build: .
+    build: ./bot
     container_name: hymns-bot-2
     restart: unless-stopped
-    env_file: .env
+    env_file: ./bot/.env
     environment:
       - BOT_TOKEN=${BOT2_TOKEN}
       - BOT_ID=${BOT2_ID}
@@ -74,7 +74,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -82,10 +82,10 @@ services:
       - botnet
 
   hymns-bot-3:
-    build: .
+    build: ./bot
     container_name: hymns-bot-3
     restart: unless-stopped
-    env_file: .env
+    env_file: ./bot/.env
     environment:
       - BOT_TOKEN=${BOT3_TOKEN}
       - BOT_ID=${BOT3_ID}
@@ -93,7 +93,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -101,10 +101,10 @@ services:
       - botnet
 
   hymns-bot-4:
-    build: .
+    build: ./bot
     container_name: hymns-bot-4
     restart: unless-stopped
-    env_file: .env
+    env_file: ./bot/.env
     environment:
       - BOT_TOKEN=${BOT4_TOKEN}
       - BOT_ID=${BOT4_ID}
@@ -112,7 +112,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - .:/app
+      - ./bot:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
