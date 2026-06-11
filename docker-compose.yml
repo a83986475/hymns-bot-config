@@ -36,7 +36,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - ./bot:/app
+      - .:/app
     ports:
       - "0.0.0.0:8080:8080"
     depends_on:
@@ -57,7 +57,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - ./bot:/app
+      - .:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -76,7 +76,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - ./bot:/app
+      - .:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -95,7 +95,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - ./bot:/app
+      - .:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
@@ -114,7 +114,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - /tmp/hymns:/tmp/hymns
-      - ./bot:/app
+      - .:/app
     depends_on:
       - telegram-bot-api
       - bgutil-ytdlp-pot-provider
