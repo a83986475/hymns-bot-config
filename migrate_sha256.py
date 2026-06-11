@@ -2,15 +2,9 @@
 """
 SHA-256 历史数据回写迁移脚本
 
-针对已存在的 hymns/files 记录（sha256 为 NULL），
-通过本地 Telegram Bot API 容器下载文件，计算 SHA-256 并写回 D1 数据库。
-
-使用方式：
-    python3 migrate_sha256.py [--dry-run] [--limit N] [--concurrency N]
-
-环境变量支持两种格式：
-  格式 A：BOT_POOL JSON（旧）
-  格式 B：BOT0_TOKEN / BOT1_TOKEN / ... / BOT4_TOKEN（当前容器格式）
+下载策略：
+  1. 先用本地 TG Bot API 容器（http://telegram-bot-api:8081）
+  2. 本地容器返回 404 或失败，自动回退到公共 https://api.telegram.org
 """
 
 import asyncio
@@ -35,14 +29,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 配置
-TG_API_BASE   = os.getenv('TG_API_BASE', 'http://telegram-bot-api:8081')
-CF_WORKER_URL = os.getenv('CF_WORKER_URL', '')
-CF_API_KEY    = os.getenv('CF_API_KEY', '')
-CF_JWT        = ''
+TG_API_BASE    = os.getenv('TG_API_BASE', 'http://telegram-bot-api:8081')
+TG_PUBLIC_BASE = 'https://api.telegram.org'  # 公共 API，回退用
+CF_WORKER_URL  = os.getenv('CF_WORKER_URL', '')
+CF_API_KEY     = os.getenv('CF_API_KEY', '')
+CF_JWT         = ''
 
-# ── Bot token 池构建 ──────────────────────────────────────────────
-# 优先读 BOT_POOL JSON，否则按 BOT0_TOKEN ~ BOT9_TOKEN 逐个扫描
-_BOT_TOKENS: list[str] = []  # index -> token，空字符串表示该 index 无效
+# ── Bot token 池 ──
+_BOT_TOKENS: list[str] = []
 
 try:
     _pool_raw = os.getenv('BOT_POOL', '')
@@ -53,39 +47,27 @@ except Exception:
     pass
 
 if not any(_BOT_TOKENS):
-    # 尝试 BOT0_TOKEN ~ BOT9_TOKEN
     for _i in range(10):
-        _t = os.getenv(f'BOT{_i}_TOKEN', '') or os.getenv(f'BOT{_i}_token', '')
+        _t = os.getenv(f'BOT{_i}_TOKEN', '')
         if _t:
-            # 确保列表够长
             while len(_BOT_TOKENS) <= _i:
                 _BOT_TOKENS.append('')
             _BOT_TOKENS[_i] = _t
 
-# 兜底：读 BOT_TOKEN
 if not any(_BOT_TOKENS):
     _fallback = os.getenv('BOT_TOKEN', '')
     if _fallback:
         _BOT_TOKENS = [_fallback]
 
-# 只保留有效 token 的列表（去掉空字符串）
 _VALID_TOKENS: list[tuple[int, str]] = [
     (i, t) for i, t in enumerate(_BOT_TOKENS) if t
 ]
 
-logger.info(f'已加载 {len(_VALID_TOKENS)} 个 Bot token：'
-            f'{[f"bot{i}" for i, _ in _VALID_TOKENS]}')
-
 
 def _get_bot_token(bot_index: int) -> Optional[str]:
-    """按 index 返回 token，找不到返回 None"""
     if 0 <= bot_index < len(_BOT_TOKENS) and _BOT_TOKENS[bot_index]:
         return _BOT_TOKENS[bot_index]
     return None
-
-
-def _all_tokens() -> list[tuple[int, str]]:
-    return _VALID_TOKENS
 
 
 def _admin_headers() -> dict:
@@ -111,21 +93,17 @@ async def _refresh_jwt(session: aiohttp.ClientSession):
         logger.warning(f'JWT 刷新失败：{e}')
 
 
-async def _try_get_file_url(
-    session: aiohttp.ClientSession,
-    file_id: str,
-    bot_token: str
-) -> Optional[str]:
-    """用指定 token 尝试 getFile，成功返回下载 URL，失败返回 None"""
-    url = f'{TG_API_BASE}/bot{bot_token}/getFile'
+async def _getfile_url(session: aiohttp.ClientSession, base: str, token: str, file_id: str) -> Optional[str]:
+    """用指定 base 和 token 调用 getFile，返回完整下载 URL"""
     try:
         async with session.get(
-            url, params={'file_id': file_id},
+            f'{base}/bot{token}/getFile',
+            params={'file_id': file_id},
             timeout=aiohttp.ClientTimeout(total=20)
         ) as resp:
             data = await resp.json()
             if data.get('ok'):
-                return f'{TG_API_BASE}/file/bot{bot_token}/{data["result"]["file_path"]}'
+                return f'{base}/file/bot{token}/{data["result"]["file_path"]}'
     except Exception:
         pass
     return None
@@ -137,28 +115,36 @@ async def _fetch_file_url(
     preferred_bot_index: int
 ) -> Optional[str]:
     """
-    先用 preferred_bot_index 对应的 token 尝试，
-    失败后轮询所有其他有效 token。
+    下载 URL 获取策略：
+      1. 尝试指定 bot + 本地容器
+      2. 轮询其他 bot + 本地容器
+      3. 全部本地失败 → 回退公共 API（每个 bot 轮询）
     """
-    # 1. 优先用指定 bot
+    # 1. 优先 bot + 本地容器
     preferred = _get_bot_token(preferred_bot_index)
     if preferred:
-        url = await _try_get_file_url(session, file_id, preferred)
+        url = await _getfile_url(session, TG_API_BASE, preferred, file_id)
         if url:
             return url
 
-    # 2. 轮询其余所有 bot
-    for idx, token in _all_tokens():
+    # 2. 其他 bot + 本地容器
+    for idx, token in _VALID_TOKENS:
         if idx == preferred_bot_index:
             continue
-        url = await _try_get_file_url(session, file_id, token)
+        url = await _getfile_url(session, TG_API_BASE, token, file_id)
         if url:
-            logger.info(
-                f'  ↩ file_id={file_id[:20]}... 由 bot{idx} 找到（原指定 bot{preferred_bot_index}）'
-            )
+            logger.info(f'  ↩ 本地容器 bot{idx} 找到 {file_id[:20]}...')
             return url
 
-    logger.warning(f'所有 bot 均无法获取 file_id={file_id[:20]}...')
+    # 3. 回退公共 API
+    logger.info(f'  ↻ 本地容器均失败，尝试公共 API: {file_id[:20]}...')
+    for idx, token in _VALID_TOKENS:
+        url = await _getfile_url(session, TG_PUBLIC_BASE, token, file_id)
+        if url:
+            logger.info(f'  ✓ 公共 API bot{idx} 找到')
+            return url
+
+    logger.warning(f'所有方式均无法获取 {file_id[:20]}...')
     return None
 
 
@@ -166,10 +152,7 @@ async def _download_and_hash(
     session: aiohttp.ClientSession,
     file_ids: list[tuple[str, int]]
 ) -> Optional[str]:
-    """
-    流式下载多分片并拼接计算 SHA-256，不将整个文件载入内存。
-    file_ids: [(file_id, bot_index), ...] 按顺序
-    """
+    """流式下载多分片并计算 SHA-256"""
     h = hashlib.sha256()
     try:
         for file_id, bot_index in file_ids:
@@ -180,7 +163,7 @@ async def _download_and_hash(
                 download_url, timeout=aiohttp.ClientTimeout(total=600)
             ) as resp:
                 if resp.status != 200:
-                    logger.warning(f'下载失败 HTTP {resp.status}')
+                    logger.warning(f'下载失败 HTTP {resp.status} ({download_url[:60]}...)')
                     return None
                 async for chunk in resp.content.iter_chunked(65536):
                     h.update(chunk)
@@ -197,53 +180,43 @@ async def _update_sha256(
     sha256: str,
     dry_run: bool
 ) -> bool:
-    """写回 SHA-256"""
     if dry_run:
-        logger.info(
-            f'  [dry-run] UPDATE {table} SET sha256={sha256[:16]}... WHERE id={record_id}'
-        )
+        logger.info(f'  [dry-run] UPDATE {table} id={record_id} sha256={sha256[:16]}...')
         return True
     url = f'{CF_WORKER_URL}/api/admin/sha256-patch'
     payload = {'table': table, 'id': record_id, 'sha256': sha256}
     try:
         async with session.post(
-            url,
-            json=payload,
+            url, json=payload,
             headers={**_admin_headers(), 'Content-Type': 'application/json'},
             timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
             if resp.status == 401:
                 await _refresh_jwt(session)
                 async with session.post(
-                    url,
-                    json=payload,
+                    url, json=payload,
                     headers={**_admin_headers(), 'Content-Type': 'application/json'},
                     timeout=aiohttp.ClientTimeout(total=15)
                 ) as resp2:
                     return resp2.status == 200
             return resp.status == 200
     except Exception as e:
-        logger.warning(f'写回 SHA-256 失败：{e}')
+        logger.warning(f'写回失败：{e}')
         return False
 
 
-async def _fetch_null_records(
-    session: aiohttp.ClientSession, limit: int
-) -> list[dict]:
-    """获取所有 sha256 为 NULL 的记录"""
+async def _fetch_null_records(session: aiohttp.ClientSession, limit: int) -> list[dict]:
     url = f'{CF_WORKER_URL}/api/admin/sha256-null-records'
     try:
         async with session.get(
-            url,
-            params={'limit': str(limit)},
+            url, params={'limit': str(limit)},
             headers=_admin_headers(),
             timeout=aiohttp.ClientTimeout(total=30)
         ) as resp:
             if resp.status == 401:
                 await _refresh_jwt(session)
                 async with session.get(
-                    url,
-                    params={'limit': str(limit)},
+                    url, params={'limit': str(limit)},
                     headers=_admin_headers(),
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp2:
@@ -260,7 +233,6 @@ async def process_record(
     dry_run: bool,
     sem: asyncio.Semaphore
 ):
-    """处理单条记录"""
     async with sem:
         table      = rec['table']
         rec_id     = rec['id']
@@ -308,11 +280,14 @@ async def process_record(
 
 async def main(dry_run: bool, limit: int, concurrency: int):
     if not CF_WORKER_URL or not CF_API_KEY:
-        logger.error('缺少 CF_WORKER_URL 或 CF_API_KEY，请检查 .env')
+        logger.error('缺少 CF_WORKER_URL 或 CF_API_KEY')
         sys.exit(1)
     if not _VALID_TOKENS:
-        logger.error('未找到任何有效 Bot token，请检查 BOT0_TOKEN~BOT4_TOKEN 或 BOT_TOKEN')
+        logger.error('未找到任何有效 Bot token')
         sys.exit(1)
+
+    logger.info(f'已加载 {len(_VALID_TOKENS)} 个 Bot: {[f"bot{i}" for i, _ in _VALID_TOKENS]}')
+    logger.info(f'本地容器: {TG_API_BASE} | 回退: {TG_PUBLIC_BASE}')
 
     connector = aiohttp.TCPConnector(limit=concurrency + 4)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -336,17 +311,11 @@ async def main(dry_run: bool, limit: int, concurrency: int):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SHA-256 历史数据回写迁移脚本')
     parser.add_argument('--dry-run', action='store_true', help='只打印不实际写入')
-    parser.add_argument(
-        '--limit', type=int, default=500,
-        help='最多处理多少条记录（默认 500）'
-    )
-    parser.add_argument(
-        '--concurrency', type=int, default=3,
-        help='并发数（默认 3，避免 TG 频率限制）'
-    )
+    parser.add_argument('--limit', type=int, default=500, help='最多处理条数（默认 500）')
+    parser.add_argument('--concurrency', type=int, default=3, help='并发数（默认 3）')
     args = parser.parse_args()
 
     if args.dry_run:
-        logger.info('=== DRY-RUN 模式，不会写入数据库 ===')
+        logger.info('=== DRY-RUN 模式 ===')
 
     asyncio.run(main(args.dry_run, args.limit, args.concurrency))
