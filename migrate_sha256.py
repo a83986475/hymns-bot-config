@@ -6,11 +6,11 @@ SHA-256 历史数据回写迁移脚本
 通过本地 Telegram Bot API 容器下载文件，计算 SHA-256 并写回 D1 数据库。
 
 使用方式：
-    python migrate_sha256.py [--dry-run] [--limit N] [--concurrency N]
+    python3 migrate_sha256.py [--dry-run] [--limit N] [--concurrency N]
 
-环境要求：
-    - .env 文件（或环境变量）包含：BOT_TOKEN, CF_WORKER_URL, CF_API_KEY
-    - TG_API_BASE 默认为 http://telegram-bot-api:8081
+环境变量支持两种格式：
+  格式 A：BOT_POOL JSON（旧）
+  格式 B：BOT0_TOKEN / BOT1_TOKEN / ... / BOT4_TOKEN（当前容器格式）
 """
 
 import asyncio
@@ -36,27 +36,56 @@ logger = logging.getLogger(__name__)
 
 # 配置
 TG_API_BASE   = os.getenv('TG_API_BASE', 'http://telegram-bot-api:8081')
-BOT_TOKEN     = os.getenv('BOT_TOKEN', '')
 CF_WORKER_URL = os.getenv('CF_WORKER_URL', '')
 CF_API_KEY    = os.getenv('CF_API_KEY', '')
 CF_JWT        = ''
 
-# BOT_POOL 支持：多 Bot 的 token 列表
-# 格式：[{"token": "xxx", "channelId": "-100..."}, ...]
-_BOT_POOL: list[dict] = []
+# ── Bot token 池构建 ──────────────────────────────────────────────
+# 优先读 BOT_POOL JSON，否则按 BOT0_TOKEN ~ BOT9_TOKEN 逐个扫描
+_BOT_TOKENS: list[str] = []  # index -> token，空字符串表示该 index 无效
+
 try:
     _pool_raw = os.getenv('BOT_POOL', '')
     if _pool_raw:
-        _BOT_POOL = json.loads(_pool_raw)
+        _pool = json.loads(_pool_raw)
+        _BOT_TOKENS = [b.get('token', '') for b in _pool]
 except Exception:
     pass
 
+if not any(_BOT_TOKENS):
+    # 尝试 BOT0_TOKEN ~ BOT9_TOKEN
+    for _i in range(10):
+        _t = os.getenv(f'BOT{_i}_TOKEN', '') or os.getenv(f'BOT{_i}_token', '')
+        if _t:
+            # 确保列表够长
+            while len(_BOT_TOKENS) <= _i:
+                _BOT_TOKENS.append('')
+            _BOT_TOKENS[_i] = _t
 
-def _get_bot_token(bot_index: int) -> str:
-    """by bot_index 返回对应的 token"""
-    if _BOT_POOL and 0 <= bot_index < len(_BOT_POOL):
-        return _BOT_POOL[bot_index]['token']
-    return BOT_TOKEN
+# 兜底：读 BOT_TOKEN
+if not any(_BOT_TOKENS):
+    _fallback = os.getenv('BOT_TOKEN', '')
+    if _fallback:
+        _BOT_TOKENS = [_fallback]
+
+# 只保留有效 token 的列表（去掉空字符串）
+_VALID_TOKENS: list[tuple[int, str]] = [
+    (i, t) for i, t in enumerate(_BOT_TOKENS) if t
+]
+
+logger.info(f'已加载 {len(_VALID_TOKENS)} 个 Bot token：'
+            f'{[f"bot{i}" for i, _ in _VALID_TOKENS]}')
+
+
+def _get_bot_token(bot_index: int) -> Optional[str]:
+    """按 index 返回 token，找不到返回 None"""
+    if 0 <= bot_index < len(_BOT_TOKENS) and _BOT_TOKENS[bot_index]:
+        return _BOT_TOKENS[bot_index]
+    return None
+
+
+def _all_tokens() -> list[tuple[int, str]]:
+    return _VALID_TOKENS
 
 
 def _admin_headers() -> dict:
@@ -82,27 +111,55 @@ async def _refresh_jwt(session: aiohttp.ClientSession):
         logger.warning(f'JWT 刷新失败：{e}')
 
 
-async def _fetch_file_url(
-    session: aiohttp.ClientSession, file_id: str, bot_token: str
+async def _try_get_file_url(
+    session: aiohttp.ClientSession,
+    file_id: str,
+    bot_token: str
 ) -> Optional[str]:
-    """getFile 获取下载 URL"""
+    """用指定 token 尝试 getFile，成功返回下载 URL，失败返回 None"""
     url = f'{TG_API_BASE}/bot{bot_token}/getFile'
     try:
         async with session.get(
             url, params={'file_id': file_id},
-            timeout=aiohttp.ClientTimeout(total=30)
+            timeout=aiohttp.ClientTimeout(total=20)
         ) as resp:
             data = await resp.json()
-            if not data.get('ok'):
-                logger.warning(
-                    f'getFile 失败：{data.get("description")} '
-                    f'(file_id={file_id[:20]}...)'
-                )
-                return None
-            return f'{TG_API_BASE}/file/bot{bot_token}/{data["result"]["file_path"]}'
-    except Exception as e:
-        logger.warning(f'getFile 异常：{e}')
-        return None
+            if data.get('ok'):
+                return f'{TG_API_BASE}/file/bot{bot_token}/{data["result"]["file_path"]}'
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_file_url(
+    session: aiohttp.ClientSession,
+    file_id: str,
+    preferred_bot_index: int
+) -> Optional[str]:
+    """
+    先用 preferred_bot_index 对应的 token 尝试，
+    失败后轮询所有其他有效 token。
+    """
+    # 1. 优先用指定 bot
+    preferred = _get_bot_token(preferred_bot_index)
+    if preferred:
+        url = await _try_get_file_url(session, file_id, preferred)
+        if url:
+            return url
+
+    # 2. 轮询其余所有 bot
+    for idx, token in _all_tokens():
+        if idx == preferred_bot_index:
+            continue
+        url = await _try_get_file_url(session, file_id, token)
+        if url:
+            logger.info(
+                f'  ↩ file_id={file_id[:20]}... 由 bot{idx} 找到（原指定 bot{preferred_bot_index}）'
+            )
+            return url
+
+    logger.warning(f'所有 bot 均无法获取 file_id={file_id[:20]}...')
+    return None
 
 
 async def _download_and_hash(
@@ -116,10 +173,8 @@ async def _download_and_hash(
     h = hashlib.sha256()
     try:
         for file_id, bot_index in file_ids:
-            bot_token = _get_bot_token(bot_index)
-            download_url = await _fetch_file_url(session, file_id, bot_token)
+            download_url = await _fetch_file_url(session, file_id, bot_index)
             if not download_url:
-                logger.warning(f'分片 file_id={file_id[:20]}... 无法获取下载 URL')
                 return None
             async with session.get(
                 download_url, timeout=aiohttp.ClientTimeout(total=600)
@@ -127,7 +182,7 @@ async def _download_and_hash(
                 if resp.status != 200:
                     logger.warning(f'下载失败 HTTP {resp.status}')
                     return None
-                async for chunk in resp.content.iter_chunked(65536):  # 64KB 分块
+                async for chunk in resp.content.iter_chunked(65536):
                     h.update(chunk)
         return h.hexdigest()
     except Exception as e:
@@ -207,7 +262,7 @@ async def process_record(
 ):
     """处理单条记录"""
     async with sem:
-        table      = rec['table']       # 'hymns' or 'files'
+        table      = rec['table']
         rec_id     = rec['id']
         file_parts = rec.get('file_parts', '[]')
         file_name  = rec.get('file_name', '')
@@ -222,11 +277,9 @@ async def process_record(
             logger.warning(f'[{table}#{rec_id}] file_parts 为空，跳过')
             return
 
-        # 收集所有分片的 file_id + bot_index（按顺序）
         file_ids: list[tuple[str, int]] = []
         for part in parts:
             if isinstance(part, str):
-                # 旧格式：file_id 字符串
                 file_ids.append((part, 0))
             elif isinstance(part, dict):
                 tg_file_id = part.get('id', '')
@@ -257,8 +310,8 @@ async def main(dry_run: bool, limit: int, concurrency: int):
     if not CF_WORKER_URL or not CF_API_KEY:
         logger.error('缺少 CF_WORKER_URL 或 CF_API_KEY，请检查 .env')
         sys.exit(1)
-    if not BOT_TOKEN and not _BOT_POOL:
-        logger.error('缺少 BOT_TOKEN 或 BOT_POOL，请检查 .env')
+    if not _VALID_TOKENS:
+        logger.error('未找到任何有效 Bot token，请检查 BOT0_TOKEN~BOT4_TOKEN 或 BOT_TOKEN')
         sys.exit(1)
 
     connector = aiohttp.TCPConnector(limit=concurrency + 4)
