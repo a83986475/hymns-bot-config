@@ -5,8 +5,6 @@ from config import config
 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
 
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
-
-# bgutil-ytdlp-pot-provider 地址
 POT_PROVIDER_URL = 'http://bgutil-ytdlp-pot-provider:4416'
 
 
@@ -16,9 +14,11 @@ def _base_opts() -> dict:
         'no_warnings': True,
         'extractor_args': {
             'youtube': {
-                'po_token': [f'web+https:{POT_PROVIDER_URL}/token'],
-                'player_client': ['web'],
-            }
+                'player_client': ['web', 'mweb'],
+            },
+            'youtubepot-bgutilhttp': {
+                'base_url': [POT_PROVIDER_URL],
+            },
         },
     }
     if os.path.exists(COOKIE_FILE):
