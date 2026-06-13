@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
 )
 from config import config
-from downloader import search_youtube, get_formats, get_playlist_info, download_audio, download_video
+from downloader import search_youtube, get_formats, get_playlist_info, download_audio, download_video, SUPPORTED_HEIGHTS, HEIGHT_LABELS
 from uploader import direct_upload, refresh_jwt
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -24,6 +24,9 @@ def is_admin(user_id: int) -> bool:
 def fmt_dur(seconds) -> str:
     s = int(seconds or 0)
     return f"{s//60}:{s%60:02d}"
+
+def _height_label(h: int) -> str:
+    return HEIGHT_LABELS.get(h, f'{h}p')
 
 # ──────────────────命令──────────────────
 
@@ -122,11 +125,13 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     buttons = [
         [InlineKeyboardButton('🎵 全部音频 MP3', callback_data=f'pl:{uid}:audio:0')],
-        [InlineKeyboardButton('🎬 全部视频 360p', callback_data=f'pl:{uid}:video:360')],
-        [InlineKeyboardButton('🎬 全部视频 480p', callback_data=f'pl:{uid}:video:480')],
-        [InlineKeyboardButton('🎬 全部视频 720p', callback_data=f'pl:{uid}:video:720')],
-        [InlineKeyboardButton('🎬 全部视频 1080p', callback_data=f'pl:{uid}:video:1080')],
     ]
+    for h in sorted(SUPPORTED_HEIGHTS):
+        buttons.append([InlineKeyboardButton(
+            f'🎬 全部视频 {_height_label(h)}',
+            callback_data=f'pl:{uid}:video:{h}'
+        )])
+
     await msg.edit_text(
         f"📋 *{info['title']}*\n"
         f"🎵 共 {info['count']} 个视频\n"
@@ -153,7 +158,7 @@ async def _show_format_picker(msg, url: str, uid: int):
     ]
     for vf in info['video_formats']:
         buttons.append([InlineKeyboardButton(
-            f'🎬 视频 {vf["height"]}p',
+            f'🎬 视频 {_height_label(vf["height"])}',
             callback_data=f'fmt:{uid}:video:{vf["format_id"]}'
         )])
 
@@ -185,7 +190,7 @@ async def callback_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ]
     for vf in info['video_formats']:
         buttons.append([InlineKeyboardButton(
-            f'🎬 视频 {vf["height"]}p',
+            f'🎬 视频 {_height_label(vf["height"])}',
             callback_data=f'fmt:{uid}:video:{vf["format_id"]}'
         )])
 
@@ -408,7 +413,6 @@ async def _task_poller():
 # ──────────────────HTTP 搜索服务（8080，仅 bot0）──────────────────
 
 async def _verify_jwt_with_backend(token: str) -> bool:
-    """转发 token 到后端 /api/admin/me 验证是否有效"""
     if not config.CF_WORKER_URL or not token:
         return False
     try:
@@ -424,7 +428,6 @@ async def _verify_jwt_with_backend(token: str) -> bool:
         return False
 
 async def _check_search_auth(request: aiohttp_web.Request) -> bool:
-    """验证请求身份：支持 CF_API_KEY（内部）或 JWT Bearer Token（前端用户）"""
     if request.headers.get('X-Admin-Token', '') == config.CF_API_KEY:
         return True
     auth = request.headers.get('Authorization', '')
@@ -457,8 +460,32 @@ async def _handle_search_http(request: aiohttp_web.Request):
         logger.error(f'HTTP 搜索异常: {e}')
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
+async def _upload_to_telegram(file_path: str, file_name: str, mime_type: str) -> dict:
+    """Upload file to STORAGE_CHAT_ID, return {file_id, file_size}. No D1 write."""
+    is_audio = mime_type.startswith('audio/')
+    method = 'sendAudio' if is_audio else 'sendDocument'
+    field  = 'audio'    if is_audio else 'document'
+
+    async with aiohttp.ClientSession() as session:
+        with open(file_path, 'rb') as f:
+            data = aiohttp.FormData()
+            data.add_field('chat_id', str(config.STORAGE_CHAT_ID))
+            data.add_field(field, f, filename=file_name, content_type=mime_type)
+            async with session.post(
+                f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/{method}",
+                data=data,
+                timeout=aiohttp.ClientTimeout(total=600)
+            ) as resp:
+                result = await resp.json()
+
+    if not result.get('ok'):
+        raise Exception(f"TG upload failed: {result.get('description', 'unknown')}")
+
+    tg_file = result['result'].get('audio') or result['result'].get('document')
+    return {'file_id': tg_file['file_id'], 'file_size': tg_file.get('file_size', 0)}
+
+
 async def _handle_download_http(request: aiohttp_web.Request):
-    """下载 YouTube 视频并直接流式返回文件，不存储到网站"""
     if not await _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
 
@@ -479,27 +506,20 @@ async def _handle_download_http(request: aiohttp_web.Request):
         file_path = meta['file_path']
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
-        content_type = meta.get('mime_type', 'application/octet-stream')
+        mime_type = meta.get('mime_type', 'application/octet-stream')
+        title = meta.get('title', file_name)
 
-        resp = aiohttp_web.StreamResponse(
-            headers={
-                'Content-Type': content_type,
-                'Content-Disposition': f'attachment; filename="{file_name}"',
-                'Content-Length': str(file_size),
-                'X-File-Name': file_name,
-                'X-File-Size': str(file_size),
-            }
-        )
-        await resp.prepare(request)
+        # Upload to Telegram, get file_id (no D1 write)
+        tg = await _upload_to_telegram(file_path, file_name, mime_type)
 
-        with open(file_path, 'rb') as f:
-            chunk = await loop.run_in_executor(None, f.read, 65536)
-            while chunk:
-                await resp.write(chunk)
-                chunk = await loop.run_in_executor(None, f.read, 65536)
-
-        await resp.write_eof()
-        return resp
+        return aiohttp_web.json_response({
+            'ok': True,
+            'file_id': tg['file_id'],
+            'file_name': file_name,
+            'file_size': tg['file_size'],
+            'mime_type': mime_type,
+            'title': title,
+        })
 
     except Exception as e:
         logger.exception(f'下载处理失败: {url}')
