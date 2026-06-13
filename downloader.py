@@ -8,13 +8,6 @@ os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
 POT_PROVIDER_URL = 'http://bgutil-ytdlp-pot-provider:4416'
 
-SUPPORTED_HEIGHTS = {360, 480, 720, 1080, 1440, 2160, 4320}
-HEIGHT_LABELS = {
-    1440: '1440p (2K)',
-    2160: '2160p (4K)',
-    4320: '4320p (8K)',
-}
-
 
 def _base_opts() -> dict:
     opts = {
@@ -52,13 +45,23 @@ def search_youtube(keyword: str, max_results: int = 5) -> list:
         return [
             {
                 'index': i + 1,
-                'title': e.get('title', '\u672a\u77e5'),
+                'title': e.get('title', '未知'),
                 'url': f"https://youtube.com/watch?v={e.get('id')}",
                 'duration': e.get('duration', 0),
                 'uploader': e.get('uploader', ''),
             }
             for i, e in enumerate(entries)
         ]
+
+
+# 支持的分辨率白名单（最低 480p，不显示 360p 及以下）
+SUPPORTED_HEIGHTS = {480, 720, 1080, 1440, 2160, 4320}
+
+# 分辨率标签映射
+HEIGHT_LABELS = {
+    2160: '2160p (4K)',
+    4320: '4320p (8K)',
+}
 
 
 def get_formats(url: str) -> dict:
@@ -73,10 +76,9 @@ def get_formats(url: str) -> dict:
     video_formats = []
     for f in reversed(info.get('formats', [])):
         h = f.get('height')
-        if h and f.get('vcodec', 'none') != 'none' and h not in seen:
+        if h and f.get('vcodec', 'none') != 'none' and h not in seen and h in SUPPORTED_HEIGHTS:
             seen.add(h)
             video_formats.append({'height': h, 'format_id': f['format_id'], 'ext': f.get('ext', 'mp4')})
-    video_formats = [f for f in video_formats if f['height'] in SUPPORTED_HEIGHTS]
     video_formats.sort(key=lambda x: x['height'])
 
     return {
@@ -106,7 +108,7 @@ def get_playlist_info(url: str) -> dict:
         'entries': [
             {
                 'index': i + 1,
-                'title': e.get('title', '\u672a\u77e5'),
+                'title': e.get('title', '未知'),
                 'url': f"https://youtube.com/watch?v={e.get('id')}",
                 'duration': e.get('duration', 0),
             }

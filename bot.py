@@ -460,6 +460,29 @@ async def _handle_search_http(request: aiohttp_web.Request):
         logger.error(f'HTTP 搜索异常: {e}')
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
+
+async def _handle_formats_http(request: aiohttp_web.Request):
+    """返回 YouTube 视频的可用格式列表（含分辨率）。"""
+    if not await _check_search_auth(request):
+        return aiohttp_web.Response(status=401, text='Unauthorized')
+
+    url = request.rel_url.query.get('url', '').strip()
+    if not url:
+        return aiohttp_web.json_response({'error': '缺少 url 参数'}, status=400)
+
+    loop = asyncio.get_event_loop()
+    try:
+        info = await loop.run_in_executor(None, get_formats, url)
+        return aiohttp_web.json_response({
+            'title':    info['title'],
+            'duration': info['duration'],
+            'uploader': info['uploader'],
+            'formats':  info['video_formats'],
+        })
+    except Exception as e:
+        logger.error(f'获取格式异常: {e}')
+        return aiohttp_web.json_response({'error': str(e)}, status=500)
+
 async def _upload_to_telegram(file_path: str, file_name: str, mime_type: str) -> dict:
     """Upload file to STORAGE_CHAT_ID, return {file_id, file_size}. No D1 write."""
     is_audio = mime_type.startswith('audio/')
@@ -538,6 +561,7 @@ async def _start_search_server():
         app = aiohttp_web.Application()
         app.router.add_get('/search', _handle_search_http)
         app.router.add_get('/download', _handle_download_http)
+        app.router.add_get('/formats', _handle_formats_http)
         runner = aiohttp_web.AppRunner(app)
         await runner.setup()
         site = aiohttp_web.TCPSite(runner, '0.0.0.0', 8080)
