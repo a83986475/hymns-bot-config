@@ -352,7 +352,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
         size_mb = os.path.getsize(meta['file_path']) / 1024 / 1024
         await _patch_task(session, task_id, progress=f'上传中（{size_mb:.1f} MB）...')
 
-        result = await direct_upload(meta['file_path'], meta)
+        result = await direct_upload(meta['file_path'], meta, uploader_id=task.get('user_id'))
 
         try:
             os.remove(meta['file_path'])
@@ -457,17 +457,74 @@ async def _handle_search_http(request: aiohttp_web.Request):
         logger.error(f'HTTP 搜索异常: {e}')
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
+async def _handle_download_http(request: aiohttp_web.Request):
+    """下载 YouTube 视频并直接流式返回文件，不存储到网站"""
+    if not await _check_search_auth(request):
+        return aiohttp_web.Response(status=401, text='Unauthorized')
+
+    url = request.rel_url.query.get('url', '').strip()
+    fmt = request.rel_url.query.get('format', 'audio')
+    fmt_id = request.rel_url.query.get('format_id', '')
+    if not url:
+        return aiohttp_web.json_response({'error': '缺少 url 参数'}, status=400)
+
+    loop = asyncio.get_event_loop()
+    file_path = None
+    try:
+        if fmt == 'video' and fmt_id:
+            meta = await loop.run_in_executor(None, download_video, url, fmt_id)
+        else:
+            meta = await loop.run_in_executor(None, download_audio, url)
+
+        file_path = meta['file_path']
+        file_name = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+        content_type = meta.get('mime_type', 'application/octet-stream')
+
+        resp = aiohttp_web.StreamResponse(
+            headers={
+                'Content-Type': content_type,
+                'Content-Disposition': f'attachment; filename="{file_name}"',
+                'Content-Length': str(file_size),
+                'X-File-Name': file_name,
+                'X-File-Size': str(file_size),
+            }
+        )
+        await resp.prepare(request)
+
+        with open(file_path, 'rb') as f:
+            chunk = await loop.run_in_executor(None, f.read, 65536)
+            while chunk:
+                await resp.write(chunk)
+                chunk = await loop.run_in_executor(None, f.read, 65536)
+
+        await resp.write_eof()
+        return resp
+
+    except Exception as e:
+        logger.exception(f'下载处理失败: {url}')
+        return aiohttp_web.json_response({'error': str(e)[:500]}, status=500)
+    finally:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f'已清理临时文件: {os.path.basename(file_path)}')
+            except Exception as e:
+                logger.warning(f'清理临时文件失败: {e}')
+
+
 async def _start_search_server():
     try:
         app = aiohttp_web.Application()
         app.router.add_get('/search', _handle_search_http)
+        app.router.add_get('/download', _handle_download_http)
         runner = aiohttp_web.AppRunner(app)
         await runner.setup()
         site = aiohttp_web.TCPSite(runner, '0.0.0.0', 8080)
         await site.start()
-        logger.info('🔍 搜索服务已启动，端口 8080')
+        logger.info('🔍 搜索+下载服务已启动，端口 8080')
     except Exception as e:
-        logger.error(f'🔍 搜索服务启动失败: {e}')
+        logger.error(f'🔍 搜索+下载服务启动失败: {e}')
 
 # ──────────────────启动──────────────────
 
@@ -485,7 +542,6 @@ async def post_init(app):
     asyncio.create_task(_task_poller())
     if config.BOT_ID == 'bot0':
         asyncio.create_task(_start_search_server())
-    # 注册指令菜单（覆盖式，重复执行无副作用）
     await app.bot.set_my_commands([
         BotCommand('start',    '查看帮助'),
         BotCommand('search',   '搜索 YouTube 视频'),

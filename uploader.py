@@ -52,6 +52,7 @@ async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str,
         "folder_id":   metadata.get("folder_id"),
         "bot_index":   bot_index,
         "sha256":      metadata.get("sha256"),
+        "uploader_id": metadata.get("uploader_id"),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -70,7 +71,11 @@ async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str,
     resp.raise_for_status()
     return resp.json()
 
-async def direct_upload(file_path: str, metadata: dict) -> dict:
+async def direct_upload(file_path: str, metadata: dict, uploader_id: int = None) -> dict:
+    """
+    直连模式：Bot 直接把文件发到本地 TG Bot API Server（无大小限制）
+    然后只调用 Worker 写一条 D1 记录
+    """
     fname = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
     sha256 = metadata.get("sha256")
@@ -102,4 +107,7 @@ async def direct_upload(file_path: str, metadata: dict) -> dict:
     file_id = audio["file_id"]
     tg_size = audio.get("file_size", file_size)
 
+    # 2. 写入 D1
+    if uploader_id is not None:
+        metadata["uploader_id"] = uploader_id
     return await _post_import(metadata, file_id, tg_size, fname, bot_index=config.BOT_INDEX)
