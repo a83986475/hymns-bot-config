@@ -349,6 +349,9 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
     try:
         await _patch_task(session, task_id, status='processing', progress='下载中...')
         if mode == 'video':
+            if not fmt:
+                # 没有指定 format_id 时下载最高画质视频
+                fmt = 'bestvideo+bestaudio'
             meta = await loop.run_in_executor(None, download_video, url, fmt)
         else:
             meta = await loop.run_in_executor(None, download_audio, url)
@@ -507,6 +510,7 @@ async def _handle_download_http(request: aiohttp_web.Request):
         file_size = os.path.getsize(file_path)
         content_type = meta.get('mime_type', 'application/octet-stream')
 
+        # 流式返回文件（不经过 Telegram），Worker 直接代理给用户
         resp = aiohttp_web.StreamResponse(
             headers={
                 'Content-Type': content_type,
