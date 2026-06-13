@@ -483,32 +483,8 @@ async def _handle_formats_http(request: aiohttp_web.Request):
         logger.error(f'获取格式异常: {e}')
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
-async def _upload_to_telegram(file_path: str, file_name: str, mime_type: str) -> dict:
-    """Upload file to STORAGE_CHAT_ID, return {file_id, file_size}. No D1 write."""
-    is_audio = mime_type.startswith('audio/')
-    method = 'sendAudio' if is_audio else 'sendDocument'
-    field  = 'audio'    if is_audio else 'document'
-
-    async with aiohttp.ClientSession() as session:
-        with open(file_path, 'rb') as f:
-            data = aiohttp.FormData()
-            data.add_field('chat_id', str(config.STORAGE_CHAT_ID))
-            data.add_field(field, f, filename=file_name, content_type=mime_type)
-            async with session.post(
-                f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/{method}",
-                data=data,
-                timeout=aiohttp.ClientTimeout(total=600)
-            ) as resp:
-                result = await resp.json()
-
-    if not result.get('ok'):
-        raise Exception(f"TG upload failed: {result.get('description', 'unknown')}")
-
-    tg_file = result['result'].get('audio') or result['result'].get('document')
-    return {'file_id': tg_file['file_id'], 'file_size': tg_file.get('file_size', 0)}
-
-
 async def _handle_download_http(request: aiohttp_web.Request):
+    """下载 YouTube 视频并直接流式返回文件，不经过 Telegram"""
     if not await _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
 
@@ -529,20 +505,27 @@ async def _handle_download_http(request: aiohttp_web.Request):
         file_path = meta['file_path']
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
-        mime_type = meta.get('mime_type', 'application/octet-stream')
-        title = meta.get('title', file_name)
+        content_type = meta.get('mime_type', 'application/octet-stream')
 
-        # Upload to Telegram, get file_id (no D1 write)
-        tg = await _upload_to_telegram(file_path, file_name, mime_type)
+        resp = aiohttp_web.StreamResponse(
+            headers={
+                'Content-Type': content_type,
+                'Content-Disposition': f'attachment; filename="{file_name}"',
+                'Content-Length': str(file_size),
+                'X-File-Name': file_name,
+                'X-File-Size': str(file_size),
+            }
+        )
+        await resp.prepare(request)
 
-        return aiohttp_web.json_response({
-            'ok': True,
-            'file_id': tg['file_id'],
-            'file_name': file_name,
-            'file_size': tg['file_size'],
-            'mime_type': mime_type,
-            'title': title,
-        })
+        with open(file_path, 'rb') as f:
+            chunk = await loop.run_in_executor(None, f.read, 65536)
+            while chunk:
+                await resp.write(chunk)
+                chunk = await loop.run_in_executor(None, f.read, 65536)
+
+        await resp.write_eof()
+        return resp
 
     except Exception as e:
         logger.exception(f'下载处理失败: {url}')
