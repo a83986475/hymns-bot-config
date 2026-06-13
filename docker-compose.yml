@@ -25,7 +25,7 @@ services:
       - botnet
 
   hymns-bot-0:
-    build: .
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-0
     restart: unless-stopped
     env_file: ./.env
@@ -46,7 +46,7 @@ services:
       - botnet
 
   hymns-bot-1:
-    build: .
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-1
     restart: unless-stopped
     env_file: ./.env
@@ -65,26 +65,26 @@ services:
       - botnet
 
   hymns-bot-2:
-      build: .
-      container_name: hymns-bot-2
-      restart: unless-stopped
-      env_file: ./.env
-      environment:
-        - BOT_TOKEN=${BOT2_TOKEN}
-        - BOT_ID=${BOT2_ID}
-        - BOT_INDEX=2
-        - TZ=Asia/Shanghai
-      volumes:
-        - /tmp/hymns:/tmp/hymns
-        - .:/app
-      depends_on:
-        - telegram-bot-api
-        - bgutil-ytdlp-pot-provider
-      networks:
-        - botnet
+    image: ghcr.io/a83986475/hymns-bot:latest
+    container_name: hymns-bot-2
+    restart: unless-stopped
+    env_file: ./.env
+    environment:
+      - BOT_TOKEN=${BOT2_TOKEN}
+      - BOT_ID=${BOT2_ID}
+      - BOT_INDEX=2
+      - TZ=Asia/Shanghai
+    volumes:
+      - /tmp/hymns:/tmp/hymns
+      - .:/app
+    depends_on:
+      - telegram-bot-api
+      - bgutil-ytdlp-pot-provider
+    networks:
+      - botnet
 
   hymns-bot-3:
-    build: .
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-3
     restart: unless-stopped
     env_file: ./.env
@@ -103,7 +103,7 @@ services:
       - botnet
 
   hymns-bot-4:
-    build: .
+    image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-4
     restart: unless-stopped
     env_file: ./.env
