@@ -383,6 +383,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             session, task_id,
             status='done',
             progress='完成',
+            title=meta.get('title', ''),
             result=json.dumps({'id': result.get('id'), 'title': meta.get('title', '')}, ensure_ascii=False)
         )
         logger.info(f'[{config.BOT_ID}] 任务 #{task_id} 完成，hymn_id={result.get("id")}')
