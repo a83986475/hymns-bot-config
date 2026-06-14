@@ -118,6 +118,7 @@ def get_playlist_info(url: str) -> dict:
 
 
 def download_audio(url: str) -> dict:
+    os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
     ydl_opts = {
         **_base_opts(),
         'format': 'bestaudio/best',
@@ -145,6 +146,7 @@ def download_audio(url: str) -> dict:
 
 
 def download_video(url: str, format_id: str) -> dict:
+    os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
     # format_id 可能是单格式（如 "137"）或组合表达式（如 "bestvideo+bestaudio"）
     # 如果已是组合表达式则直接使用，否则追加最佳音频
     format_str = format_id if '+' in format_id else f'{format_id}+bestaudio/best'
