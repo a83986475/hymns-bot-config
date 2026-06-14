@@ -1,9 +1,16 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     container_name: telegram-bot-api
     restart: unless-stopped
+    logging: *default-logging
     environment:
       TELEGRAM_API_ID: ${TG_API_ID}
       TELEGRAM_API_HASH: ${TG_API_HASH}
@@ -19,6 +26,7 @@ services:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
     container_name: bgutil-ytdlp-pot-provider
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "127.0.0.1:4416:4416"
     networks:
@@ -28,6 +36,7 @@ services:
     image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-0
     restart: unless-stopped
+    logging: *default-logging
     env_file: ./.env
     environment:
       - BOT_TOKEN=${BOT0_TOKEN}
@@ -48,6 +57,7 @@ services:
     image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-1
     restart: unless-stopped
+    logging: *default-logging
     env_file: ./.env
     environment:
       - BOT_TOKEN=${BOT1_TOKEN}
@@ -66,6 +76,7 @@ services:
     image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-2
     restart: unless-stopped
+    logging: *default-logging
     env_file: ./.env
     environment:
       - BOT_TOKEN=${BOT2_TOKEN}
@@ -84,6 +95,7 @@ services:
     image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-3
     restart: unless-stopped
+    logging: *default-logging
     env_file: ./.env
     environment:
       - BOT_TOKEN=${BOT3_TOKEN}
@@ -102,6 +114,7 @@ services:
     image: ghcr.io/a83986475/hymns-bot:latest
     container_name: hymns-bot-4
     restart: unless-stopped
+    logging: *default-logging
     env_file: ./.env
     environment:
       - BOT_TOKEN=${BOT4_TOKEN}
