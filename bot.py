@@ -443,7 +443,7 @@ async def _verify_jwt_with_backend(token: str) -> bool:
             async with session.get(
                 f"{config.CF_WORKER_URL}/api/admin/me",
                 headers={'Authorization': f'Bearer {token}'},
-                timeout=aiohttp.ClientTimeout(total=5)
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 return resp.status == 200
     except Exception as e:
