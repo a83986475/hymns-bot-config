@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
 import aiohttp
 from aiohttp import web as aiohttp_web
@@ -464,6 +465,12 @@ async def _check_search_auth(request: aiohttp_web.Request) -> bool:
         return await _verify_jwt_with_backend(query_token)
     return False
 
+def _get_video_id(url: str) -> str:
+    """从 YouTube URL 提取视频 ID"""
+    m = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
+    return m.group(1) if m else ''
+
+
 async def _handle_search_http(request: aiohttp_web.Request):
     if not await _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
@@ -512,7 +519,15 @@ async def _handle_formats_http(request: aiohttp_web.Request):
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
 async def _handle_download_http(request: aiohttp_web.Request):
-    """下载 YouTube 视频并直接流式返回文件，不经过 Telegram"""
+    """下载 YouTube 视频并流式返回文件（支持缓存 + Range 断点续传）。
+
+    流程：
+    1. 检查缓存是否存在且未过期（<30 分钟）
+    2. 缓存命中 → 跳过 yt-dlp，直接从缓存文件服务
+    3. 缓存未命中 → 执行 yt-dlp，重命名文件以包含 format_id
+    4. 解析 Range 请求头 → 206 Partial Content（断点续传）
+    5. 文件不自动删除，由 _cleanup_temp_dir 定时清理（30 分钟阈值）
+    """
     if not await _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
 
@@ -525,24 +540,94 @@ async def _handle_download_http(request: aiohttp_web.Request):
     loop = asyncio.get_event_loop()
     file_path = None
     try:
-        if fmt == 'video' and fmt_id:
-            meta = await loop.run_in_executor(None, download_video, url, fmt_id)
-        else:
-            meta = await loop.run_in_executor(None, download_audio, url)
+        # ── 尝试使用缓存文件 ──
+        video_id = _get_video_id(url)
+        cache_path = None
+        if video_id:
+            if fmt == 'audio':
+                cache_path = os.path.join(config.DOWNLOAD_DIR, f'{video_id}.mp3')
+            elif fmt_id:
+                cache_path = os.path.join(config.DOWNLOAD_DIR, f'{video_id}_{fmt_id}.mp4')
 
-        file_path = meta['file_path']
-        file_name = os.path.basename(file_path)
+        now = time.time()
+        if cache_path and os.path.exists(cache_path) and (now - os.path.getmtime(cache_path)) < 1800:
+            file_path = cache_path
+            logger.info(f'缓存命中: {os.path.basename(cache_path)}')
+            content_type = 'video/mp4' if fmt == 'video' else 'audio/mpeg'
+
+        # ── 缓存未命中，执行下载 ──
+        if not file_path:
+            if fmt == 'video' and fmt_id:
+                meta = await loop.run_in_executor(None, download_video, url, fmt_id)
+            else:
+                meta = await loop.run_in_executor(None, download_audio, url)
+
+            file_path = meta['file_path']
+            content_type = meta.get('mime_type', 'application/octet-stream')
+
+            # 视频重命名以包含 format_id，便于缓存区分不同分辨率
+            if fmt == 'video' and fmt_id and cache_path and file_path != cache_path:
+                if os.path.exists(cache_path):
+                    os.remove(cache_path)
+                os.rename(file_path, cache_path)
+                file_path = cache_path
+                logger.info(f'缓存写入: {os.path.basename(cache_path)}')
+
         file_size = os.path.getsize(file_path)
-        content_type = meta.get('mime_type', 'application/octet-stream')
+        file_name = os.path.basename(file_path)
 
-        # 流式返回文件（不经过 Telegram），Worker 直接代理给用户
+        # ── 解析 Range 请求头 ──
+        range_header = request.headers.get('Range', '')
+        if range_header:
+            m = re.match(r'bytes=(\d+)-(\d*)', range_header)
+            if m:
+                start = int(m.group(1))
+                end_str = m.group(2)
+                end = int(end_str) if end_str else file_size - 1
+
+                if start >= file_size:
+                    return aiohttp_web.Response(
+                        status=416,
+                        headers={'Content-Range': f'bytes */{file_size}'},
+                        text='Range Not Satisfiable'
+                    )
+
+                end = min(end, file_size - 1)
+                content_length = end - start + 1
+
+                resp = aiohttp_web.StreamResponse(
+                    status=206,
+                    headers={
+                        'Content-Type': content_type,
+                        'Content-Disposition': f'attachment; filename="{file_name}"',
+                        'Content-Length': str(content_length),
+                        'Content-Range': f'bytes {start}-{end}/{file_size}',
+                        'Accept-Ranges': 'bytes',
+                    }
+                )
+                await resp.prepare(request)
+
+                with open(file_path, 'rb') as f:
+                    f.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = await loop.run_in_executor(None, f.read, chunk_size)
+                        if not chunk:
+                            break
+                        await resp.write(chunk)
+                        remaining -= len(chunk)
+
+                await resp.write_eof()
+                return resp
+
+        # ── 无 Range 请求头，返回完整文件 ──
         resp = aiohttp_web.StreamResponse(
             headers={
                 'Content-Type': content_type,
                 'Content-Disposition': f'attachment; filename="{file_name}"',
                 'Content-Length': str(file_size),
-                'X-File-Name': file_name,
-                'X-File-Size': str(file_size),
+                'Accept-Ranges': 'bytes',
             }
         )
         await resp.prepare(request)
@@ -559,13 +644,7 @@ async def _handle_download_http(request: aiohttp_web.Request):
     except Exception as e:
         logger.exception(f'下载处理失败: {url}')
         return aiohttp_web.json_response({'error': str(e)[:500]}, status=500)
-    finally:
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f'已清理临时文件: {os.path.basename(file_path)}')
-            except Exception as e:
-                logger.warning(f'清理临时文件失败: {e}')
+    # 文件不自动删除，由 _cleanup_temp_dir 定时清理（.mp3/.mp4 超过 30 分钟自动删除）
 
 
 async def _start_search_server():
