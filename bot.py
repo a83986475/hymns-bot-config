@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 import aiohttp
 from aiohttp import web as aiohttp_web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -592,9 +593,38 @@ async def _auto_refresh_jwt():
             logger.error(f'JWT 刷新异常：{e}')
         await asyncio.sleep(23 * 3600)
 
+async def _cleanup_temp_dir():
+    """定时清理下载中断残留的临时文件。"""
+    while True:
+        try:
+            if not os.path.isdir(config.DOWNLOAD_DIR):
+                await asyncio.sleep(1800)
+                continue
+            now = time.time()
+            cleaned = 0
+            for fname in os.listdir(config.DOWNLOAD_DIR):
+                fpath = os.path.join(config.DOWNLOAD_DIR, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                age = now - os.path.getmtime(fpath)
+                # .part 或 .ytdl 等临时后缀 → 超过 10 分钟即删除
+                if fname.endswith(('.part', '.ytdl', '.fragment', '.temp')) and age > 600:
+                    os.remove(fpath)
+                    cleaned += 1
+                # 已完成但未清理的 .mp3/.mp4 → 超过 30 分钟删除
+                elif fname.endswith(('.mp3', '.mp4', '.m4a', '.webm')) and age > 1800:
+                    os.remove(fpath)
+                    cleaned += 1
+            if cleaned:
+                logger.info(f'🧹 已清理 {cleaned} 个残留文件（{config.DOWNLOAD_DIR}）')
+        except Exception as e:
+            logger.warning(f'临时文件清理异常: {e}')
+        await asyncio.sleep(1800)  # 每 30 分钟执行一次
+
 async def post_init(app):
     asyncio.create_task(_auto_refresh_jwt())
     asyncio.create_task(_task_poller())
+    asyncio.create_task(_cleanup_temp_dir())
     if config.BOT_ID == 'bot0':
         asyncio.create_task(_start_search_server())
     await app.bot.set_my_commands([
