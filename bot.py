@@ -357,6 +357,10 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             meta = await loop.run_in_executor(None, download_audio, url)
 
         meta['category'] = category
+        # 传递文件夹 ID（下载页面提交时指定）
+        folder_id = task.get('folder_id')
+        if folder_id is not None:
+            meta['folder_id'] = folder_id
         size_mb = os.path.getsize(meta['file_path']) / 1024 / 1024
         await _patch_task(session, task_id, progress=f'上传中（{size_mb:.1f} MB）...')
 
