@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 import aiohttp
 from aiohttp import web as aiohttp_web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -10,6 +11,9 @@ from telegram.ext import (
 from config import config
 from downloader import search_youtube, get_formats, get_playlist_info, download_audio, download_video, SUPPORTED_HEIGHTS, HEIGHT_LABELS
 from uploader import direct_upload, refresh_jwt
+
+# 每 bot 最多 1 个并发下载+上传任务，防止 Telegram flood control
+_task_semaphore = asyncio.Semaphore(1)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -242,6 +246,9 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
 
     for i, entry in enumerate(entries, 1):
+        # 每项之间延迟 2-5 秒，避免触发 flood control
+        if i > 1:
+            await asyncio.sleep(random.uniform(2, 5))
         try:
             await query.edit_message_text(
                 f"⬇️ *{info['title']}*\n"
@@ -388,6 +395,11 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             pass
         await _patch_task(session, task_id, status='failed', error=str(e)[:500])
 
+async def _execute_task_with_semaphore(session, task):
+    async with _task_semaphore:
+        await _execute_task(session, task)
+
+
 async def _task_poller():
     if not config.CF_WORKER_URL or not config.CF_API_KEY:
         logger.warning(f'[{config.BOT_ID}] CF_WORKER_URL 或 CF_API_KEY 未配置，任务轮询已禁用')
@@ -408,8 +420,11 @@ async def _task_poller():
                         data = await resp.json()
                         task = data.get('task')
                         if task:
-                            asyncio.create_task(_execute_task(session, task))
-                        await asyncio.sleep(0.5 if task else config.POLL_INTERVAL)
+                            # 用信号量限制并发，最多同时处理 1 个任务
+                            asyncio.create_task(_execute_task_with_semaphore(session, task))
+                        # 随机 jitter 避免 5 个 bot 同时轮询
+                        base_sleep = 0.5 if task else config.POLL_INTERVAL
+                        await asyncio.sleep(base_sleep + random.uniform(0, 1.5))
                     else:
                         logger.warning(f'[{config.BOT_ID}] poll 失败: {resp.status}')
                         await asyncio.sleep(config.POLL_INTERVAL)
