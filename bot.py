@@ -457,6 +457,10 @@ async def _check_search_auth(request: aiohttp_web.Request) -> bool:
     if auth.startswith('Bearer '):
         token = auth[7:].strip()
         return await _verify_jwt_with_backend(token)
+    # 支持从 query parameter 传递 JWT（用于新标签页直连下载）
+    query_token = request.rel_url.query.get('token', '')
+    if query_token:
+        return await _verify_jwt_with_backend(query_token)
     return False
 
 async def _handle_search_http(request: aiohttp_web.Request):
