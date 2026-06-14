@@ -147,9 +147,17 @@ def download_audio(url: str) -> dict:
 
 def download_video(url: str, format_id: str) -> dict:
     os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
-    # format_id 可能是单格式（如 "137"）或组合表达式（如 "bestvideo+bestaudio"）
-    # 如果已是组合表达式则直接使用，否则追加最佳音频
-    format_str = format_id if '+' in format_id else f'{format_id}+bestaudio/best'
+    # format_id 处理：支持预设值（''/''best''/''1080''/''720''）或具体 format_id
+    if not format_id or format_id in ('best', ''):
+        format_str = 'bestvideo+bestaudio/best'
+    elif format_id == '1080':
+        format_str = 'bestvideo[height<=1080]+bestaudio/best'
+    elif format_id == '720':
+        format_str = 'bestvideo[height<=720]+bestaudio/best'
+    elif '+' in format_id:
+        format_str = format_id
+    else:
+        format_str = f'{format_id}+bestaudio/best'
     ydl_opts = {
         **_base_opts(),
         'format': format_str,
