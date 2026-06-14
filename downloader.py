@@ -78,15 +78,26 @@ def get_formats(url: str) -> dict:
         h = f.get('height')
         if h and f.get('vcodec', 'none') != 'none' and h not in seen and h in SUPPORTED_HEIGHTS:
             seen.add(h)
-            video_formats.append({'height': h, 'format_id': f['format_id'], 'ext': f.get('ext', 'mp4')})
+            filesize = f.get('filesize') or f.get('filesize_approx') or 0
+            video_formats.append({
+                'height': h,
+                'format_id': f['format_id'],
+                'ext': f.get('ext', 'mp4'),
+                'filesize': filesize,
+            })
     video_formats.sort(key=lambda x: x['height'])
+
+    # 估算音频文件大小：192kbps × 时长
+    duration = info.get('duration', 0)
+    audio_size_estimate = int(duration * 192 * 1000 / 8) if duration > 0 else 0
 
     return {
         'title': info.get('title', ''),
-        'duration': info.get('duration', 0),
+        'duration': duration,
         'uploader': info.get('uploader', ''),
         'description': (info.get('description') or '')[:500],
         'video_formats': video_formats,
+        'audio_size_estimate': audio_size_estimate,
     }
 
 
