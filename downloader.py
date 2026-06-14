@@ -145,9 +145,12 @@ def download_audio(url: str) -> dict:
 
 
 def download_video(url: str, format_id: str) -> dict:
+    # format_id 可能是单格式（如 "137"）或组合表达式（如 "bestvideo+bestaudio"）
+    # 如果已是组合表达式则直接使用，否则追加最佳音频
+    format_str = format_id if '+' in format_id else f'{format_id}+bestaudio/best'
     ydl_opts = {
         **_base_opts(),
-        'format': f'{format_id}+bestaudio/best',
+        'format': format_str,
         'outtmpl': f'{config.DOWNLOAD_DIR}/%(id)s.%(ext)s',
         'merge_output_format': 'mp4',
     }
