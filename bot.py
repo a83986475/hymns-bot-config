@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import time
 import aiohttp
 from aiohttp import web as aiohttp_web
@@ -16,6 +17,12 @@ from uploader import direct_upload, refresh_jwt
 
 # 每 bot 最多 1 个并发下载+上传任务，防止 Telegram flood control
 _task_semaphore = asyncio.Semaphore(1)
+
+# 追踪当前正在通过 HTTP 流式传输的文件（磁盘满时紧急清理用）
+_active_streams: set = set()
+
+# 磁盘空间警戒线：剩余空间低于此值时触发预防性清理（保护 VPS 上其他服务）
+_MIN_FREE_SPACE = 2 * 1024**3  # 2GB
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -557,10 +564,35 @@ async def _handle_download_http(request: aiohttp_web.Request):
 
         # ── 缓存未命中，执行下载 ──
         if not file_path:
-            if fmt == 'video' and fmt_id:
-                meta = await loop.run_in_executor(None, download_video, url, fmt_id)
-            else:
-                meta = await loop.run_in_executor(None, download_audio, url)
+            # 主动检查磁盘空间，低于 2GB 时提前触发清理（保护其他服务不受影响）
+            try:
+                usage = shutil.disk_usage(config.DOWNLOAD_DIR)
+                if usage.free < _MIN_FREE_SPACE:
+                    logger.warning(f'⚠️ 磁盘剩余 {usage.free/1024/1024:.0f} MB，低于 2GB 警戒线，触发预防性清理...')
+                    # 目标是释放到 2GB 以上，再多清 500MB 余量
+                    target = _MIN_FREE_SPACE - usage.free + 500 * 1024**2
+                    await _emergency_disk_cleanup(target_bytes=target)
+            except Exception:
+                pass  # 检查失败不阻塞下载
+
+            try:
+                if fmt == 'video' and fmt_id:
+                    meta = await loop.run_in_executor(None, download_video, url, fmt_id)
+                else:
+                    meta = await loop.run_in_executor(None, download_audio, url)
+            except OSError as e:
+                if e.errno == 28 or 'No space left' in str(e):
+                    logger.warning('⚠️ 磁盘空间仍然不足，二次紧急清理...')
+                    # 估算需要释放的空间（当前下载文件大概需要 2 倍空间用于临时缓存 + 最终文件）
+                    target = int(os.stat(file_path).st_size * 2) if file_path and os.path.exists(file_path) else 0
+                    await _emergency_disk_cleanup(target_bytes=target)
+                    # 清理后重试一次
+                    if fmt == 'video' and fmt_id:
+                        meta = await loop.run_in_executor(None, download_video, url, fmt_id)
+                    else:
+                        meta = await loop.run_in_executor(None, download_audio, url)
+                else:
+                    raise
 
             file_path = meta['file_path']
             content_type = meta.get('mime_type', 'application/octet-stream')
@@ -607,18 +639,21 @@ async def _handle_download_http(request: aiohttp_web.Request):
                 )
                 await resp.prepare(request)
 
-                with open(file_path, 'rb') as f:
-                    f.seek(start)
-                    remaining = content_length
-                    while remaining > 0:
-                        chunk_size = min(65536, remaining)
-                        chunk = await loop.run_in_executor(None, f.read, chunk_size)
-                        if not chunk:
-                            break
-                        await resp.write(chunk)
-                        remaining -= len(chunk)
-
-                await resp.write_eof()
+                _active_streams.add(file_path)
+                try:
+                    with open(file_path, 'rb') as f:
+                        f.seek(start)
+                        remaining = content_length
+                        while remaining > 0:
+                            chunk_size = min(65536, remaining)
+                            chunk = await loop.run_in_executor(None, f.read, chunk_size)
+                            if not chunk:
+                                break
+                            await resp.write(chunk)
+                            remaining -= len(chunk)
+                    await resp.write_eof()
+                finally:
+                    _active_streams.discard(file_path)
                 return resp
 
         # ── 无 Range 请求头，返回完整文件 ──
@@ -632,19 +667,69 @@ async def _handle_download_http(request: aiohttp_web.Request):
         )
         await resp.prepare(request)
 
-        with open(file_path, 'rb') as f:
-            chunk = await loop.run_in_executor(None, f.read, 65536)
-            while chunk:
-                await resp.write(chunk)
+        _active_streams.add(file_path)
+        try:
+            with open(file_path, 'rb') as f:
                 chunk = await loop.run_in_executor(None, f.read, 65536)
-
-        await resp.write_eof()
+                while chunk:
+                    await resp.write(chunk)
+                    chunk = await loop.run_in_executor(None, f.read, 65536)
+            await resp.write_eof()
+        finally:
+            _active_streams.discard(file_path)
         return resp
 
     except Exception as e:
         logger.exception(f'下载处理失败: {url}')
         return aiohttp_web.json_response({'error': str(e)[:500]}, status=500)
     # 文件不自动删除，由 _cleanup_temp_dir 定时清理（.mp3/.mp4 超过 30 分钟自动删除）
+
+
+async def _emergency_disk_cleanup(target_bytes: int = 0, exclude_path: str = None) -> int:
+    """磁盘满时紧急清理：删除最旧的未在下载中的已完成缓存文件。
+
+    Args:
+        target_bytes: 需要释放的目标字节数（0 = 全部可删文件都删光）
+        exclude_path: 排除的文件路径（不删除自己）
+    """
+    if not os.path.isdir(config.DOWNLOAD_DIR):
+        return 0
+
+    candidates = []
+    exclude_abs = os.path.abspath(exclude_path) if exclude_path else None
+
+    for fname in os.listdir(config.DOWNLOAD_DIR):
+        fpath = os.path.join(config.DOWNLOAD_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        # 只清理已完成文件（非 .part 等临时文件）
+        if not fname.endswith(('.mp3', '.mp4', '.m4a', '.webm')):
+            continue
+        # 跳过正在被用户下载的文件
+        if fpath in _active_streams:
+            continue
+        # 跳过自己
+        if exclude_abs and os.path.abspath(fpath) == exclude_abs:
+            continue
+        candidates.append((os.path.getmtime(fpath), fpath))
+
+    candidates.sort()  # 最旧的在前（优先删除最早缓存的文件）
+    deleted = 0
+    freed = 0
+    for _, fpath in candidates:
+        try:
+            freed += os.path.getsize(fpath)
+            os.remove(fpath)
+            deleted += 1
+            logger.info(f'🧹 磁盘满紧急清理: {os.path.basename(fpath)}')
+            if target_bytes and freed >= target_bytes:
+                break
+        except Exception as e:
+            logger.warning(f'紧急清理删除失败: {fpath}: {e}')
+
+    if deleted:
+        logger.info(f'🧹 紧急清理完成：删除了 {deleted} 个文件，释放 {freed/1024/1024:.0f} MB')
+    return deleted
 
 
 async def _start_search_server():
@@ -690,8 +775,8 @@ async def _cleanup_temp_dir():
                 if fname.endswith(('.part', '.ytdl', '.fragment', '.temp')) and age > 600:
                     os.remove(fpath)
                     cleaned += 1
-                # 已完成但未清理的 .mp3/.mp4 → 超过 30 分钟删除
-                elif fname.endswith(('.mp3', '.mp4', '.m4a', '.webm')) and age > 1800:
+                # 已完成但未清理的 .mp3/.mp4 → 超过 30 分钟删除（跳过正在传输的）
+                elif fname.endswith(('.mp3', '.mp4', '.m4a', '.webm')) and age > 1800 and fpath not in _active_streams:
                     os.remove(fpath)
                     cleaned += 1
             if cleaned:
