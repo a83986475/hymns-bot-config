@@ -3,7 +3,7 @@
 # ══════════════════════════════════════════
 
 # Stage 1: Node.js binary (only, not the full OS)
-FROM node:lts-slim AS node-stage
+FROM node:24-slim AS node-stage
 
 # Stage 2: Python runtime
 FROM python:3.11-slim
