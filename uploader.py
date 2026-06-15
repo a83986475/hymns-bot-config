@@ -1,10 +1,14 @@
 import asyncio
 import httpx
+import math
 import os
 from config import config
 
 # 每 bot 最多 1 个并发上传，防止 Telegram flood control
 _upload_semaphore = asyncio.Semaphore(1)
+
+# 分片大小：与网站上传一致 (10MB)，每个分片 ≤10MB 确保远低于 Telegram Cloud API 的 20MB getFile 限制
+CHUNK_SIZE = 10 * 1024 * 1024
 
 
 async def refresh_jwt() -> str:
@@ -47,7 +51,8 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
     return None
 
 
-async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str, bot_index: int = 0) -> dict:
+async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: str) -> dict:
+    """调用 Worker import 接口写入 D1 记录，file_parts 为分片列表 [{"id": "tg_file_id", "b": bot_index}, ...]"""
     mime_type = metadata.get("mime_type", "audio/mpeg")
     payload = {
         "title":       metadata.get("title", fname),
@@ -57,9 +62,8 @@ async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str,
         "file_name":   fname,
         "file_size":   file_size,
         "mime_type":   mime_type,
-        "file_id":     file_id,
+        "file_parts":  file_parts,
         "folder_id":   metadata.get("folder_id"),
-        "bot_index":   bot_index,
         "sha256":      metadata.get("sha256"),
         "uploader_id": metadata.get("uploader_id"),
     }
@@ -81,38 +85,65 @@ async def _post_import(metadata: dict, file_id: str, file_size: int, fname: str,
     return resp.json()
 
 
-async def _tg_upload_with_retry(url: str, data: dict, file_path: str, file_field: str, mime_type: str, max_retries: int = 5) -> dict:
-    """向 Telegram API 上传文件，遇到 429 RetryAfter 自动重试（每次重试重新打开文件）"""
-    fname = os.path.basename(file_path)
+async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, is_video: bool, caption: str = None) -> dict:
+    """上传单个分片到 Telegram，返回 file_id"""
+    data = {"chat_id": config.STORAGE_CHAT_ID}
+    if caption:
+        data["caption"] = caption
+
+    if is_video:
+        field = "document"
+        url = f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/sendDocument"
+    else:
+        field = "audio"
+        data["title"] = chunk_name
+        url = f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/sendAudio"
+
+    max_retries = 5
     for attempt in range(max_retries):
-        with open(file_path, "rb") as f:
+        try:
             async with httpx.AsyncClient(timeout=600) as client:
-                files = {file_field: (fname, f, mime_type)}
+                files = {field: (chunk_name, chunk_data, mime_type)}
                 resp = await client.post(url, data=data, files=files)
 
-        if resp.status_code == 429:
-            retry_after = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s, 80s
-            import logging
-            logging.getLogger(__name__).warning(
-                f'TG 429 限流，{retry_after}s 后重试 (attempt {attempt+1}/{max_retries})'
-            )
-            await asyncio.sleep(retry_after)
-            continue
+            if resp.status_code == 429:
+                retry_after = 5 * (2 ** attempt)
+                import logging
+                logging.getLogger(__name__).warning(
+                    f'TG 429 限流，{retry_after}s 后重试 (attempt {attempt+1}/{max_retries})'
+                )
+                await asyncio.sleep(retry_after)
+                continue
 
-        resp.raise_for_status()
-        result = resp.json()
-        if not result.get("ok"):
-            raise Exception(f"TG 上传失败：{result.get('description', 'unknown error')}")
-        return result
+            resp.raise_for_status()
+            result = resp.json()
+            if not result.get("ok"):
+                raise Exception(f"TG 上传失败：{result.get('description', 'unknown error')}")
 
-    raise Exception(f"TG 上传重试 {max_retries} 次后仍失败")
+            if is_video:
+                return {"file_id": result["result"]["document"]["file_id"]}
+            else:
+                return {"file_id": result["result"]["audio"]["file_id"]}
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f'分片 {chunk_name} 上传失败 (attempt {attempt+1}/{max_retries}): {e}，重试...'
+                )
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise
+
+    raise Exception(f"分片 {chunk_name} 上传重试 {max_retries} 次后仍失败")
 
 
 async def direct_upload(file_path: str, metadata: dict, uploader_id: int = None) -> dict:
     """
-    直连模式：Bot 直接把文件发到本地 TG Bot API Server（无大小限制）
-    然后只调用 Worker 写一条 D1 记录
-    使用信号量限制并发 + 429 自动重试
+    直连模式：Bot 直接把文件分片上传到 Telegram Cloud API，
+    然后只调用 Worker 写一条 D1 记录。
+    文件 > 10MB 时自动分片，每片单独 sendDocument/sendAudio。
+    使用信号量限制并发 + 429 自动重试。
     """
     async with _upload_semaphore:
         return await _do_upload(file_path, metadata, uploader_id)
@@ -131,39 +162,38 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
         if dup:
             return {"id": dup.get("id"), "dedup": True, "filename": dup.get("filename")}
 
-    if is_video:
-        data = {
-            "chat_id": config.STORAGE_CHAT_ID,
-            "caption": f"\U0001f3ac {metadata.get('title', fname)}",
-        }
-        result = await _tg_upload_with_retry(
-            f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/sendDocument",
-            data=data,
-            file_path=file_path,
-            file_field="document",
-            mime_type=mime_type,
+    file_parts = []
+
+    if file_size <= CHUNK_SIZE:
+        # ── 小文件：直接上传，不分片 ──
+        caption = (
+            f"\U0001f3ac {metadata.get('title', fname)}"
+            if is_video
+            else f"\U0001f3b5 {metadata.get('title', fname)}"
         )
-        doc = result["result"].get("document", {})
-        file_id = doc["file_id"]
-        tg_size = doc.get("file_size", file_size)
+        with open(file_path, "rb") as f:
+            chunk_data = f.read()
+        result = await _tg_upload_chunk(chunk_data, fname, mime_type, is_video, caption)
+        file_parts.append({"id": result["file_id"], "b": config.BOT_INDEX})
     else:
-        data = {
-            "chat_id": config.STORAGE_CHAT_ID,
-            "title": metadata.get("title", fname),
-            "performer": metadata.get("artist", ""),
-            "caption": f"\U0001f3b5 {metadata.get('title', fname)}",
-        }
-        result = await _tg_upload_with_retry(
-            f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/sendAudio",
-            data=data,
-            file_path=file_path,
-            file_field="audio",
-            mime_type=mime_type,
-        )
-        audio = result["result"]["audio"]
-        file_id = audio["file_id"]
-        tg_size = audio.get("file_size", file_size)
+        # ── 大文件：分片上传 ──
+        total_chunks = math.ceil(file_size / CHUNK_SIZE)
+        with open(file_path, "rb") as f:
+            for i in range(total_chunks):
+                chunk_data = f.read(CHUNK_SIZE)
+                if not chunk_data:
+                    break
+                chunk_name = f"{fname}.part{i + 1}of{total_chunks}"
+                # 只有第一片带 caption
+                caption = (
+                    f"\U0001f3ac {metadata.get('title', fname)} [part 1/{total_chunks}]"
+                    if i == 0 and is_video
+                    else (f"\U0001f3b5 {metadata.get('title', fname)} [part 1/{total_chunks}]"
+                          if i == 0 else None)
+                )
+                result = await _tg_upload_chunk(chunk_data, chunk_name, mime_type, is_video, caption)
+                file_parts.append({"id": result["file_id"], "b": config.BOT_INDEX})
 
     if uploader_id is not None:
         metadata["uploader_id"] = uploader_id
-    return await _post_import(metadata, file_id, tg_size, fname, bot_index=config.BOT_INDEX)
+    return await _post_import(metadata, file_parts, file_size, fname)
