@@ -177,7 +177,7 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
         file_parts.append({"id": result["file_id"], "b": config.BOT_INDEX})
     else:
         # ── 大文件：分片上传 ──
-        total_chunks = math.ceil(file_size / CHUNK_SIZE)
+        total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
         with open(file_path, "rb") as f:
             for i in range(total_chunks):
                 chunk_data = f.read(CHUNK_SIZE)
