@@ -805,6 +805,9 @@ def main():
     app = (
         Application.builder()
         .token(config.BOT_TOKEN)
+        .base_url(config.TG_API_BASE)
+        .base_file_url(config.TG_API_BASE + '/file')
+        .local_mode(True)
         .post_init(post_init)
         .build()
     )
