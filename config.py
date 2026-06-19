@@ -16,7 +16,7 @@ class Config:
     STORAGE_CHAT_ID:  str  = os.getenv("STORAGE_CHAT_ID", "")
     TG_API_BASE:      str  = os.getenv("TG_API_BASE", "http://telegram-bot-api:8081")
     BOT_ID:           str  = os.getenv("BOT_ID", "bot-1")
-    POLL_INTERVAL:    int  = int(os.getenv("POLL_INTERVAL", "6"))
+    POLL_INTERVAL:    int  = int(os.getenv("POLL_INTERVAL", "30"))
 
     def __post_init__(self):
         ids = os.getenv("ADMIN_IDS", "")
