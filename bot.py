@@ -310,7 +310,7 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     success, failed, failed_items = await _process_playlist_entries(
-        query, uid, info, entries, total, fmt, res
+        query, info, entries, total, fmt, res
     )
 
     # 构建最终消息
