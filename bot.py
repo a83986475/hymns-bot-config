@@ -31,6 +31,17 @@ search_cache:   dict = {}   # uid -> [results]
 format_cache:   dict = {}   # uid -> {url, formats_info}
 playlist_cache: dict = {}   # uid -> {entries, title, count}
 
+# 每个缓存的条目上限，防止长期运行后内存泄漏
+_MAX_CACHE_SIZE = 100
+
+def _cache_put(cache: dict, key, value, max_size: int = _MAX_CACHE_SIZE):
+    """插入缓存项，超出上限时淘汰最旧的条目（Python 3.7+ dict 保持插入顺序）。"""
+    cache[key] = value
+    while len(cache) > max_size:
+        oldest = next(iter(cache))
+        del cache[oldest]
+
+
 def is_admin(user_id: int) -> bool:
     return not config.ADMIN_IDS or user_id in config.ADMIN_IDS
 
@@ -65,7 +76,7 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         results = search_youtube(keyword, max_results=5)
         if not results:
             await msg.edit_text('❌ 未找到结果'); return
-        search_cache[update.effective_user.id] = results
+        _cache_put(search_cache, update.effective_user.id, results)
         lines, buttons = [], []
         for r in results:
             dur = fmt_dur(r.get('duration'))
@@ -133,7 +144,7 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not info['entries']:
         await msg.edit_text('❌ 播放列表为空'); return
 
-    playlist_cache[uid] = info
+    _cache_put(playlist_cache, uid, info)
     total_dur = fmt_dur(info['total_duration'])
 
     buttons = [
@@ -164,7 +175,7 @@ async def _show_format_picker(msg, url: str, uid: int):
     except Exception as e:
         await msg.reply_text(f'❌ 无法获取格式：{e}'); return
 
-    format_cache[uid] = {'url': url, 'info': info}
+    _cache_put(format_cache, uid, {'url': url, 'info': info})
 
     buttons = [
         [InlineKeyboardButton('🎵 音频 MP3', callback_data=f'fmt:{uid}:audio:0')],
@@ -196,7 +207,7 @@ async def callback_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.edit_message_text(f'❌ 无法获取格式：{e}'); return
 
-    format_cache[uid] = {'url': item['url'], 'info': info}
+    _cache_put(format_cache, uid, {'url': item['url'], 'info': info})
 
     buttons = [
         [InlineKeyboardButton('🎵 音频 MP3', callback_data=f'fmt:{uid}:audio:0')],
@@ -329,7 +340,7 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if failed > 0:
         # 保存失败项到缓存，供重试按钮使用
         if 'failed_items' not in playlist_cache:
-            playlist_cache['failed_items'] = {}
+            _cache_put(playlist_cache, 'failed_items', {})
         playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items}
         buttons.append([InlineKeyboardButton(
             f'🔄 重试失败项 ({failed})',
