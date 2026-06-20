@@ -712,6 +712,28 @@ async def _verify_jwt_with_backend(token: str) -> bool:
         logger.warning(f'验证 JWT 异常: {e}')
         return False
 
+async def _verify_ticket_with_backend(ticket: str) -> dict | None:
+    """向 Worker 验证一次性下载凭证。返回验证通过的参数 dict，失败返回 None。"""
+    if not config.CF_WORKER_URL or not ticket:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{config.CF_WORKER_URL}/api/youtube-dl/verify-ticket",
+                json={'ticket': ticket},
+                headers={'X-Admin-Token': config.CF_API_KEY, 'Content-Type': 'application/json'},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('valid'):
+                        return data
+        return None
+    except Exception as e:
+        logger.warning(f'验证 ticket 异常: {e}')
+        return None
+
+
 async def _check_search_auth(request: aiohttp_web.Request) -> bool:
     if request.headers.get('X-Admin-Token', '') == config.CF_API_KEY:
         return True
@@ -719,10 +741,14 @@ async def _check_search_auth(request: aiohttp_web.Request) -> bool:
     if auth.startswith('Bearer '):
         token = auth[7:].strip()
         return await _verify_jwt_with_backend(token)
-    # 支持从 query parameter 传递 JWT（用于新标签页直连下载）
-    query_token = request.rel_url.query.get('token', '')
-    if query_token:
-        return await _verify_jwt_with_backend(query_token)
+    # 支持从 query parameter 传递一次性下载凭证（替代已移除的 ?token=）
+    query_ticket = request.rel_url.query.get('ticket', '')
+    if query_ticket:
+        result = await _verify_ticket_with_backend(query_ticket)
+        if result:
+            # 将验证通过的参数存入 request，供下载处理使用
+            request._ticket_data = result
+            return True
     return False
 
 def _get_video_id(url: str) -> str:
@@ -791,9 +817,16 @@ async def _handle_download_http(request: aiohttp_web.Request):
     if not await _check_search_auth(request):
         return aiohttp_web.Response(status=401, text='Unauthorized')
 
-    url = request.rel_url.query.get('url', '').strip()
-    fmt = request.rel_url.query.get('format', 'audio')
-    fmt_id = request.rel_url.query.get('format_id', '')
+    # 优先使用 ticket 验证通过时携带的参数（防御深度：防止 URL 参数被篡改）
+    if hasattr(request, '_ticket_data') and request._ticket_data:
+        td = request._ticket_data
+        url = td.get('url', '').strip()
+        fmt = td.get('format', 'audio')
+        fmt_id = td.get('format_id', '')
+    else:
+        url = request.rel_url.query.get('url', '').strip()
+        fmt = request.rel_url.query.get('format', 'audio')
+        fmt_id = request.rel_url.query.get('format_id', '')
     if not url:
         return aiohttp_web.json_response({'error': '缺少 url 参数'}, status=400)
 
