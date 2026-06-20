@@ -640,10 +640,11 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
 
     except Exception as e:
         logger.exception(f'[{config.BOT_ID}] 任务 #{task_id} 失败')
-        try:
-            os.remove(meta['file_path'])
-        except Exception:
-            pass
+        if 'meta' in locals() and meta and 'file_path' in meta:
+            try:
+                os.remove(meta['file_path'])
+            except Exception:
+                pass
         await _patch_task_retry(session, task_id, status='failed', error=str(e)[:500])
 
 async def _execute_task_with_semaphore(session, task):
