@@ -489,14 +489,14 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             try:
                 info = await loop.run_in_executor(None, get_playlist_info, url)
             except Exception as e:
-                await _patch_task(session, task_id, status='failed', error=f'解析播放列表失败：{e}')
+                await _patch_task_retry(session, task_id, status='failed', error=f'解析播放列表失败：{e}')
                 logger.error(f'[{config.BOT_ID}] 播放列表解析失败 #{task_id}: {e}')
                 return
 
             entries = info.get('entries', [])
             total = len(entries)
             if total == 0:
-                await _patch_task(session, task_id, status='failed', error='播放列表为空')
+                await _patch_task_retry(session, task_id, status='failed', error='播放列表为空')
                 return
 
             success, failed = 0, 0
@@ -596,7 +596,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
                     'items': items,
                     'failed_items': failed_items,
                 }
-                await _patch_task(
+                await _patch_task_retry(
                     session, task_id,
                     status='done',
                     progress=summary,
@@ -629,7 +629,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
         except Exception:
             pass
 
-        await _patch_task(
+        await _patch_task_retry(
             session, task_id,
             status='done',
             progress='完成',
@@ -644,7 +644,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             os.remove(meta['file_path'])
         except Exception:
             pass
-        await _patch_task(session, task_id, status='failed', error=str(e)[:500])
+        await _patch_task_retry(session, task_id, status='failed', error=str(e)[:500])
 
 async def _execute_task_with_semaphore(session, task):
     async with _task_semaphore:
