@@ -674,6 +674,11 @@ async def _task_poller():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
+                # 如果当前 Bot 正在忙（信号量被占用），不轮询新任务，防止单 Bot 囤积
+                if _task_semaphore.locked():
+                    await asyncio.sleep(2)
+                    continue
+
                 async with session.post(
                     poll_url,
                     json={'bot_id': config.BOT_ID},
