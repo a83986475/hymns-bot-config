@@ -442,14 +442,33 @@ async def _do_download_and_upload(msg, url: str, metadata: dict, fmt: str, fmt_i
 def _worker_headers() -> dict:
     return {'X-Admin-Token': config.CF_API_KEY, 'Content-Type': 'application/json'}
 
-async def _patch_task(session: aiohttp.ClientSession, task_id: int, **kwargs):
+async def _patch_task(session: aiohttp.ClientSession, task_id: int, **kwargs) -> bool:
+    """更新任务状态/进度。返回 True 表示 Worker 返回 200，False 表示失败。"""
     url = f"{config.CF_WORKER_URL}/api/bot/tasks/{task_id}"
     try:
         async with session.patch(url, json=kwargs, headers=_worker_headers()) as r:
-            if r.status != 200:
-                logger.warning(f'[{config.BOT_ID}] patch task {task_id} failed: {r.status}')
+            if r.status == 200:
+                return True
+            logger.warning(f'[{config.BOT_ID}] patch task {task_id} failed: {r.status}')
     except Exception as e:
         logger.warning(f'[{config.BOT_ID}] patch task {task_id} error: {e}')
+    return False
+
+
+async def _patch_task_retry(session: aiohttp.ClientSession, task_id: int, **kwargs) -> bool:
+    """带重试的 _patch_task，最多重试 3 次（1s/2s/4s 退避）。
+    仅用于关键状态更新（done/failed），确保不会因 Worker 临时故障导致任务卡死。"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        ok = await _patch_task(session, task_id, **kwargs)
+        if ok:
+            return True
+        if attempt < max_retries - 1:
+            delay = 2 ** attempt  # 1, 2, 4 秒
+            logger.warning(f'[{config.BOT_ID}] _patch_task_retry #{task_id} {delay}s 后第{attempt+2}次重试...')
+            await asyncio.sleep(delay)
+    logger.error(f'[{config.BOT_ID}] _patch_task_retry #{task_id} 重试{max_retries}次后仍失败')
+    return False
 
 async def _execute_task(session: aiohttp.ClientSession, task: dict):
     task_id = task['id']

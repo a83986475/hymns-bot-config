@@ -7,8 +7,9 @@ from config import config
 # 每 bot 最多 1 个并发上传，防止 Telegram flood control
 _upload_semaphore = asyncio.Semaphore(1)
 
-# 分片大小：与网站上传一致 (10MB)，每个分片 ≤10MB 确保远低于 Telegram Cloud API 的 20MB getFile 限制
-CHUNK_SIZE = 10 * 1024 * 1024
+# 分片大小：50MB，减少分片数量以降低 Telegram API 调用次数和上传失败概率
+# 同时仍远低于 Telegram Cloud API 的 20MB getFile 限制（本地容器无此限制）
+CHUNK_SIZE = 50 * 1024 * 1024
 
 
 async def refresh_jwt() -> str:
