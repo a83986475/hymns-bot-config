@@ -7,9 +7,12 @@ from config import config
 # 每 bot 最多 1 个并发上传，防止 Telegram flood control
 _upload_semaphore = asyncio.Semaphore(1)
 
-# 分片大小：50MB，减少分片数量以降低 Telegram API 调用次数和上传失败概率
-# 同时仍远低于 Telegram Cloud API 的 20MB getFile 限制（本地容器无此限制）
-CHUNK_SIZE = 50 * 1024 * 1024
+# 分片大小：18MB
+# Telegram Bot API 上传上限 50MB（含 multipart/form-data 开销），
+# 因此单分片不能过于接近该值。
+# 18MB 与前端本地上传的分片上限保持一致，
+# 且远低于 Telegram Bot API 的 50MB 上限，避免因元数据开销导致 413 拒绝。
+CHUNK_SIZE = 18 * 1024 * 1024
 
 
 async def refresh_jwt() -> str:
@@ -115,6 +118,13 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
                 )
                 await asyncio.sleep(retry_after)
                 continue
+
+            if resp.status_code == 413:
+                # 分片过大，缩小分片无意义，直接报错
+                raise Exception(
+                    f'TG 413 Payload Too Large：分片 {chunk_name} ({len(chunk_data)} bytes) '
+                    '超过 Telegram Bot API 上传上限（50MB），请减小 CHUNK_SIZE'
+                )
 
             resp.raise_for_status()
             result = resp.json()
