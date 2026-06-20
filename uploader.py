@@ -2,10 +2,8 @@ import asyncio
 import httpx
 import math
 import os
+import random
 from config import config
-
-# 每 bot 最多 1 个并发上传，防止 Telegram flood control
-_upload_semaphore = asyncio.Semaphore(1)
 
 # 分片大小：18MB
 # Telegram Bot API 上传上限 50MB（含 multipart/form-data 开销），
@@ -129,10 +127,10 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
                 resp = await client.post(url, data=data, files=files)
 
             if resp.status_code == 429:
-                retry_after = 5 * (2 ** attempt)
+                retry_after = 5 * (2 ** attempt) + random.uniform(0, 3)
                 import logging
                 logging.getLogger(__name__).warning(
-                    f'TG 429 限流，{retry_after}s 后重试 (attempt {attempt+1}/{max_retries})'
+                    f'TG 429 限流，{retry_after:.1f}s 后重试 (attempt {attempt+1}/{max_retries})'
                 )
                 await asyncio.sleep(retry_after)
                 continue
@@ -172,10 +170,9 @@ async def direct_upload(file_path: str, metadata: dict, uploader_id: int = None)
     直连模式：Bot 直接把文件分片上传到 Telegram Cloud API，
     然后只调用 Worker 写一条 D1 记录。
     文件 > 10MB 时自动分片，每片单独 sendDocument/sendAudio。
-    使用信号量限制并发 + 429 自动重试。
+    429 自动重试（递增退避 + 随机 jitter）。
     """
-    async with _upload_semaphore:
-        return await _do_upload(file_path, metadata, uploader_id)
+    return await _do_upload(file_path, metadata, uploader_id)
 
 
 async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) -> dict:
