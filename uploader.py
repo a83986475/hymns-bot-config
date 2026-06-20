@@ -89,19 +89,37 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
     return resp.json()
 
 
-async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, is_video: bool, caption: str = None) -> dict:
-    """上传单个分片到 Telegram，返回 file_id"""
+async def _get_upload_bot_token() -> dict:
+    """从 Worker BotPool 获取一个上传用的 bot token（轮询分配）。返回 {token, bot_index}，失败时回退到自身。"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
+                headers=_admin_headers()
+            )
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception:
+        pass
+    # 回退：使用自己的 token
+    return {"token": config.BOT_TOKEN, "bot_index": config.BOT_INDEX}
+
+
+async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, is_video: bool, caption: str = None, bot_token: str = None, bot_index: int = None) -> dict:
+    """上传单个分片到 Telegram，返回 file_id 和 bot_index"""
+    _token = bot_token or config.BOT_TOKEN
+    _bot_index = bot_index if bot_index is not None else config.BOT_INDEX
     data = {"chat_id": config.STORAGE_CHAT_ID}
     if caption:
         data["caption"] = caption
 
     if is_video:
         field = "document"
-        url = f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/sendDocument"
+        url = f"{config.TG_API_BASE}/bot{_token}/sendDocument"
     else:
         field = "audio"
         data["title"] = chunk_name
-        url = f"{config.TG_API_BASE}/bot{config.BOT_TOKEN}/sendAudio"
+        url = f"{config.TG_API_BASE}/bot{_token}/sendAudio"
 
     max_retries = 5
     for attempt in range(max_retries):
@@ -132,9 +150,9 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
                 raise Exception(f"TG 上传失败：{result.get('description', 'unknown error')}")
 
             if is_video:
-                return {"file_id": result["result"]["document"]["file_id"]}
+                return {"file_id": result["result"]["document"]["file_id"], "b": _bot_index}
             else:
-                return {"file_id": result["result"]["audio"]["file_id"]}
+                return {"file_id": result["result"]["audio"]["file_id"], "b": _bot_index}
 
         except Exception as e:
             if attempt < max_retries - 1:
@@ -184,8 +202,11 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
         )
         with open(file_path, "rb") as f:
             chunk_data = f.read()
-        result = await _tg_upload_chunk(chunk_data, fname, mime_type, is_video, caption)
-        file_parts.append({"id": result["file_id"], "b": config.BOT_INDEX})
+        # 从 BotPool 获取上传 token（分布式上传）
+        token_data = await _get_upload_bot_token()
+        result = await _tg_upload_chunk(chunk_data, fname, mime_type, is_video, caption,
+                                        token_data["token"], token_data["bot_index"])
+        file_parts.append({"id": result["file_id"], "b": result.get("b", token_data["bot_index"])})
     else:
         # ── 大文件：分片并行上传 ──
         total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -204,12 +225,15 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
                           if i == 0 else None)
                 )
                 chunks.append((chunk_data, chunk_name, caption))
+        # 获取所有分片的上传 token（并行获取，轮询分配到不同 Bot）
+        tokens = await asyncio.gather(*[_get_upload_bot_token() for _ in chunks])
         # 并发上传所有分片（asyncio.gather 保持返回顺序）
         results = await asyncio.gather(*[
-            _tg_upload_chunk(data, name, mime_type, is_video, cap)
-            for data, name, cap in chunks
+            _tg_upload_chunk(data, name, mime_type, is_video, cap,
+                             token["token"], token["bot_index"])
+            for (data, name, cap), token in zip(chunks, tokens)
         ])
-        file_parts = [{"id": r["file_id"], "b": config.BOT_INDEX} for r in results]
+        file_parts = [{"id": r["file_id"], "b": r.get("b", tokens[i]["bot_index"])} for i, r in enumerate(results)]
 
     if uploader_id is not None:
         metadata["uploader_id"] = uploader_id
