@@ -187,23 +187,29 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
         result = await _tg_upload_chunk(chunk_data, fname, mime_type, is_video, caption)
         file_parts.append({"id": result["file_id"], "b": config.BOT_INDEX})
     else:
-        # ── 大文件：分片上传 ──
+        # ── 大文件：分片并行上传 ──
         total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+        # 先将所有分片读入内存
+        chunks = []
         with open(file_path, "rb") as f:
             for i in range(total_chunks):
                 chunk_data = f.read(CHUNK_SIZE)
                 if not chunk_data:
                     break
                 chunk_name = f"{fname}.part{i + 1}of{total_chunks}"
-                # 只有第一片带 caption
                 caption = (
                     f"\U0001f3ac {metadata.get('title', fname)} [part 1/{total_chunks}]"
                     if i == 0 and is_video
                     else (f"\U0001f3b5 {metadata.get('title', fname)} [part 1/{total_chunks}]"
                           if i == 0 else None)
                 )
-                result = await _tg_upload_chunk(chunk_data, chunk_name, mime_type, is_video, caption)
-                file_parts.append({"id": result["file_id"], "b": config.BOT_INDEX})
+                chunks.append((chunk_data, chunk_name, caption))
+        # 并发上传所有分片（asyncio.gather 保持返回顺序）
+        results = await asyncio.gather(*[
+            _tg_upload_chunk(data, name, mime_type, is_video, cap)
+            for data, name, cap in chunks
+        ])
+        file_parts = [{"id": r["file_id"], "b": config.BOT_INDEX} for r in results]
 
     if uploader_id is not None:
         metadata["uploader_id"] = uploader_id
