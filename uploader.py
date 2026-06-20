@@ -6,10 +6,10 @@ import random
 from config import config
 
 # 分片大小：18MB
-# Telegram Bot API 上传上限 50MB（含 multipart/form-data 开销），
+# 实际受限于 Telegram Bot API 本地代理（telegram-bot-api）默认 20MB 上传上限，
 # 因此单分片不能过于接近该值。
 # 18MB 与前端本地上传的分片上限保持一致，
-# 且远低于 Telegram Bot API 的 50MB 上限，避免因元数据开销导致 413 拒绝。
+# 且留出约 2MB 的 multipart/form-data 开销余量，避免因元数据导致 413 拒绝。
 CHUNK_SIZE = 18 * 1024 * 1024
 
 
