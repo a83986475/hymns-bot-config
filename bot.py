@@ -231,6 +231,64 @@ async def callback_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await _do_download_and_upload(query.message, url, {}, fmt, fmt_id if fmt == 'video' else None)
 
+async def _process_playlist_entries(query, info, entries, total, fmt, res):
+    """处理播放列表条目，带重试逻辑和失败收集。返回 (success, failed, failed_items)。"""
+    success, failed = 0, 0
+    failed_items = []
+    loop = asyncio.get_event_loop()
+
+    for i, entry in enumerate(entries, 1):
+        # 每项之间延迟 2-5 秒，避免触发 flood control
+        if i > 1:
+            await asyncio.sleep(random.uniform(2, 5))
+
+        MAX_RETRIES = 1
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                if attempt > 0:
+                    await query.edit_message_text(
+                        f"🔄 重试 {i}/{total} — {entry['title'][:35]}...\n📋 {info['title']}",
+                        parse_mode='Markdown'
+                    )
+                    await asyncio.sleep(2)
+
+                await query.edit_message_text(
+                    f"⬇️ {'重试' if attempt > 0 else '下载'}中 {i}/{total} — {entry['title'][:40]}\n📋 {info['title']}",
+                    parse_mode='Markdown'
+                )
+
+                if fmt == 'audio':
+                    meta = await loop.run_in_executor(None, download_audio, entry['url'])
+                else:
+                    fmts = await loop.run_in_executor(None, get_formats, entry['url'])
+                    target_h = int(res)
+                    matched = next((f for f in fmts['video_formats'] if f['height'] == target_h), None)
+                    if not matched:
+                        matched = min(fmts['video_formats'], key=lambda f: abs(f['height'] - target_h), default=None)
+                    if not matched:
+                        failed_items.append({'url': entry['url'], 'title': entry.get('title', '')})
+                        failed += 1
+                        break
+                    meta = await loop.run_in_executor(None, download_video, entry['url'], matched['format_id'])
+
+                result = await direct_upload(meta['file_path'], meta)
+                try:
+                    os.remove(meta['file_path'])
+                except Exception:
+                    pass
+                success += 1
+                break  # 成功后退出重试循环
+            except Exception as e:
+                logger.error(f'播放列表第{i}项失败（第{attempt+1}次）：{e}')
+                if attempt < MAX_RETRIES:
+                    logger.info(f'即将重试第{i}项...')
+                else:
+                    failed_items.append({'url': entry['url'], 'title': entry.get('title', '')})
+                    failed += 1
+
+    return success, failed, failed_items
+
+
 async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -251,47 +309,88 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-    success, failed = 0, 0
-    loop = asyncio.get_event_loop()
+    success, failed, failed_items = await _process_playlist_entries(
+        query, uid, info, entries, total, fmt, res
+    )
 
-    for i, entry in enumerate(entries, 1):
-        # 每项之间延迟 2-5 秒，避免触发 flood control
-        if i > 1:
-            await asyncio.sleep(random.uniform(2, 5))
-        try:
-            await query.edit_message_text(
-                f"⬇️ *{info['title']}*\n"
-                f"进度：{i}/{total} — {entry['title'][:40]}",
-                parse_mode='Markdown'
-            )
-            if fmt == 'audio':
-                meta = await loop.run_in_executor(None, download_audio, entry['url'])
-            else:
-                fmts = await loop.run_in_executor(None, get_formats, entry['url'])
-                target_h = int(res)
-                matched = next((f for f in fmts['video_formats'] if f['height'] == target_h), None)
-                if not matched:
-                    matched = min(fmts['video_formats'], key=lambda f: abs(f['height'] - target_h), default=None)
-                if not matched:
-                    failed += 1
-                    continue
-                meta = await loop.run_in_executor(None, download_video, entry['url'], matched['format_id'])
+    # 构建最终消息
+    result_msg = f"{'✅' if failed == 0 else '⚠️'} *播放列表下载完成*\n\n"
+    result_msg += f"📋 {info['title']}\n"
+    result_msg += f"✅ 成功：{success}\n"
+    if failed > 0:
+        result_msg += f"❌ 失败：{failed}\n"
+        # 列出失败项标题（最多显示 5 个，避免消息过长）
+        for item in failed_items[:5]:
+            result_msg += f"   • {item['title'][:40]}\n"
+        if len(failed_items) > 5:
+            result_msg += f'   … 还有 {len(failed_items) - 5} 项\n'
 
-            result = await direct_upload(meta['file_path'], meta)
-            try:
-                os.remove(meta['file_path'])
-            except Exception:
-                pass
-            success += 1
-        except Exception as e:
-            logger.error(f'播放列表第{i}项失败：{e}')
-            failed += 1
+    buttons = []
+    if failed > 0:
+        # 保存失败项到缓存，供重试按钮使用
+        if 'failed_items' not in playlist_cache:
+            playlist_cache['failed_items'] = {}
+        playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items}
+        buttons.append([InlineKeyboardButton(
+            f'🔄 重试失败项 ({failed})',
+            callback_data=f'rpl:{uid}:{fmt}:{res}'
+        )])
 
     await query.edit_message_text(
-        f"✅ *播放列表下载完成*\n\n"
-        f"📋 {info['title']}\n"
-        f"✅ 成功：{success}\n"
-        f"❌ 失败：{failed}",
+        result_msg,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        parse_mode='Markdown'
+    )
+
+
+async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """重试播放列表中失败的项。"""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(':')
+    uid, fmt, res = int(parts[1]), parts[2], parts[3]
+
+    if 'failed_items' not in playlist_cache or uid not in playlist_cache['failed_items']:
+        await query.edit_message_text('❌ 缓存已过期，请重新发送链接'); return
+
+    cached = playlist_cache['failed_items'][uid]
+    failed_entries = cached['items']
+    total = len(failed_entries)
+    title = '重试失败项'
+
+    await query.edit_message_text(
+        f"🔄 开始重试 {total} 个失败项...\n"
+        f"格式：{'音频 MP3' if fmt == 'audio' else f'视频 {res}p'}\n"
+        f"进度：0/{total}",
+        parse_mode='Markdown'
+    )
+
+    # 复用处理逻辑，把失败项当作 entries
+    success, failed, failed_items2 = await _process_playlist_entries(
+        query, {'title': title}, failed_entries, total, fmt, res
+    )
+
+    result_msg = f"{'✅' if failed == 0 else '⚠️'} *重试完成*\n\n"
+    result_msg += f"📋 原播放列表\n"
+    result_msg += f"✅ 成功：{success}\n"
+    if failed > 0:
+        result_msg += f"❌ 失败：{failed}\n"
+        for item in failed_items2[:5]:
+            result_msg += f"   • {item['title'][:40]}\n"
+        if len(failed_items2) > 5:
+            result_msg += f'   … 还有 {len(failed_items2) - 5} 项\n'
+
+    buttons = []
+    if failed > 0:
+        playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items2}
+        buttons.append([InlineKeyboardButton(
+            f'🔄 再次重试 ({failed})',
+            callback_data=f'rpl:{uid}:{fmt}:{res}'
+        )])
+
+    await query.edit_message_text(
+        result_msg,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
         parse_mode='Markdown'
     )
 
@@ -362,18 +461,142 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
     logger.info(f'[{config.BOT_ID}] 开始任务 #{task_id}: {mode} {url}')
     loop = asyncio.get_event_loop()
 
+    import json
+
     try:
+        # ── 播放列表模式：解析列表，逐项下载 ──
+        if mode == 'playlist':
+            await _patch_task(session, task_id, status='processing', progress='正在解析播放列表...')
+            try:
+                info = await loop.run_in_executor(None, get_playlist_info, url)
+            except Exception as e:
+                await _patch_task(session, task_id, status='failed', error=f'解析播放列表失败：{e}')
+                logger.error(f'[{config.BOT_ID}] 播放列表解析失败 #{task_id}: {e}')
+                return
+
+            entries = info.get('entries', [])
+            total = len(entries)
+            if total == 0:
+                await _patch_task(session, task_id, status='failed', error='播放列表为空')
+                return
+
+            success, failed = 0, 0
+            items = []
+            failed_items = []
+            cancelled = False
+            for i, entry in enumerate(entries, 1):
+                # 每项开始前检查是否被取消（含第 1 项）
+                try:
+                    async with session.get(
+                        f"{config.CF_WORKER_URL}/api/bot/tasks/{task_id}/status",
+                        headers=_worker_headers()
+                    ) as sr:
+                        if sr.status == 200:
+                            sd = await sr.json()
+                            if sd.get('status') == 'cancelled':
+                                logger.info(f'[{config.BOT_ID}] 播放列表 #{task_id} 已被用户取消（第{i}项）')
+                                cancelled = True
+                                break
+                except Exception:
+                    pass  # 检查失败时继续处理，不阻塞下载
+
+                # 每项之间延迟 2-5 秒，避免触发频率限制
+                if i > 1:
+                    await asyncio.sleep(random.uniform(2, 5))
+
+                # 失败后自动重试一次
+                MAX_RETRIES = 1
+                for attempt in range(MAX_RETRIES + 1):
+                    try:
+                        if attempt > 0:
+                            retry_msg = f'🔄 重试 {i}/{total} — {entry["title"][:35]}...'
+                            await _patch_task(session, task_id, progress=retry_msg)
+                            await asyncio.sleep(2)
+
+                        progress_msg = f'下载中 {i}/{total} — {entry["title"][:40]}'
+                        await _patch_task(session, task_id, progress=progress_msg)
+
+                        if fmt:
+                            # 视频模式（fmt 可能是 'best'/'1080'/'720'，download_video 内部处理）
+                            meta = await loop.run_in_executor(None, download_video, entry['url'], fmt)
+                        else:
+                            # 音频模式
+                            meta = await loop.run_in_executor(None, download_audio, entry['url'])
+
+                        meta['category'] = category
+                        folder_id = task.get('folder_id')
+                        if folder_id is not None:
+                            meta['folder_id'] = folder_id
+
+                        upload_msg = f'上传中 {i}/{total} — {meta.get("title", entry["title"])[:30]}...'
+                        await _patch_task(session, task_id, progress=upload_msg)
+                        result = await direct_upload(meta['file_path'], meta, uploader_id=task.get('user_id'))
+
+                        try:
+                            os.remove(meta['file_path'])
+                        except Exception:
+                            pass
+
+                        success += 1
+                        items.append({'id': result.get('id'), 'title': meta.get('title', '')})
+                        break  # 成功后退出重试循环
+                    except Exception as e:
+                        logger.error(f'[{config.BOT_ID}] 播放列表第{i}项失败（第{attempt+1}次） #{task_id}: {e}')
+                        if attempt < MAX_RETRIES:
+                            logger.info(f'[{config.BOT_ID}] 即将重试第{i}项...')
+                        else:
+                            failed_items.append({'url': entry['url'], 'title': entry.get('title', '')})
+                            failed += 1
+
+            if cancelled:
+                summary = f'已取消：成功 {success}，失败 {failed}，已完成 {success+failed}/{total}'
+                result_data = {
+                    'success': success,
+                    'failed': failed,
+                    'total': total,
+                    'cancelled': True,
+                    'playlist_title': info.get('title', ''),
+                    'items': items,
+                    'failed_items': failed_items,
+                }
+                # 不传 status——cancel 端点已将其设置为 'cancelled'；worker 的 PATCH 也不允许 bot 设置 'cancelled'
+                await _patch_task(
+                    session, task_id,
+                    progress=summary,
+                    title=info.get('title', ''),
+                    result=json.dumps(result_data, ensure_ascii=False)
+                )
+                logger.info(f'[{config.BOT_ID}] 播放列表任务 #{task_id} 已取消: {summary}')
+            else:
+                summary = f'完成：成功 {success}，失败 {failed}，共 {total}'
+                result_data = {
+                    'success': success,
+                    'failed': failed,
+                    'total': total,
+                    'playlist_title': info.get('title', ''),
+                    'items': items,
+                    'failed_items': failed_items,
+                }
+                await _patch_task(
+                    session, task_id,
+                    status='done',
+                    progress=summary,
+                    title=info.get('title', ''),
+                    result=json.dumps(result_data, ensure_ascii=False)
+                )
+                logger.info(f'[{config.BOT_ID}] 播放列表任务 #{task_id} 完成: {summary}')
+            return
+
+        # ── 非播放列表：单个文件下载 ──
         await _patch_task(session, task_id, status='processing', progress='下载中...')
         if mode == 'video':
             if not fmt:
-                # 没有指定 format_id 时下载最高画质视频
                 fmt = 'bestvideo+bestaudio'
             meta = await loop.run_in_executor(None, download_video, url, fmt)
         else:
             meta = await loop.run_in_executor(None, download_audio, url)
 
         meta['category'] = category
-        # 传递文件夹 ID（下载页面提交时指定）
         folder_id = task.get('folder_id')
         if folder_id is not None:
             meta['folder_id'] = folder_id
@@ -387,7 +610,6 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
         except Exception:
             pass
 
-        import json
         await _patch_task(
             session, task_id,
             status='done',
@@ -821,6 +1043,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_pick,     pattern=r'^pick:'))
     app.add_handler(CallbackQueryHandler(callback_format,   pattern=r'^fmt:'))
     app.add_handler(CallbackQueryHandler(callback_playlist, pattern=r'^pl:'))
+    app.add_handler(CallbackQueryHandler(callback_retry_playlist_failed, pattern=r'^rpl:'))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
