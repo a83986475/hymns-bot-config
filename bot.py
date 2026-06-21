@@ -15,6 +15,9 @@ from config import config
 from downloader import search_youtube, get_formats, get_playlist_info, download_audio, download_video, SUPPORTED_HEIGHTS, HEIGHT_LABELS
 from uploader import direct_upload, refresh_jwt
 
+# Telegram Bot Application 全局引用（用于向管理员发消息）
+_bot_app: Application = None
+
 # 每 bot 最多 1 个并发下载+上传任务，防止 Telegram flood control
 _task_semaphore = asyncio.Semaphore(1)
 
@@ -752,8 +755,16 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
                         error_str = e2_str
                         break
             else:
-                # 所有重试耗尽 → 标记限流缓存，禁止后续任务再请求该视频
+                # 所有重试耗尽 → 标记限流缓存 + 通知管理员
                 _mark_yt_rate_limit(url)
+                task_title = task.get('title', '') or ''
+                video_id = _get_video_id(url)
+                await _alert_admin(
+                    f'🚫 YouTube 限流（{config.BOT_ID}）\n'
+                    f'任务 #{task_id}：{task_title[:40]}\n'
+                    f'video_id：{video_id}\n'
+                    f'已冷却 {_YT_RATE_LIMIT_COOLDOWN // 60} 分钟'
+                )
 
         logger.exception(f'[{config.BOT_ID}] 任务 #{task_id} 失败')
         if 'meta' in locals() and meta and 'file_path' in meta:
@@ -1181,7 +1192,19 @@ async def _cleanup_temp_dir():
             logger.warning(f'临时文件清理异常: {e}')
         await asyncio.sleep(1800)  # 每 30 分钟执行一次
 
+async def _alert_admin(msg: str):
+    """向所有管理员发送 Telegram 通知。不会阻塞，fire-and-forget。"""
+    if not _bot_app:
+        return
+    for uid in config.ADMIN_IDS:
+        try:
+            await _bot_app.bot.send_message(chat_id=uid, text=msg, disable_notification=False)
+        except Exception as e:
+            logger.warning(f'发送管理员通知失败 (uid={uid}): {e}')
+
 async def post_init(app):
+    global _bot_app
+    _bot_app = app
     asyncio.create_task(_auto_refresh_jwt())
     asyncio.create_task(_task_poller())
     asyncio.create_task(_cleanup_temp_dir())
