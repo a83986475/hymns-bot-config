@@ -149,6 +149,7 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     buttons = [
         [InlineKeyboardButton('🎵 全部音频 MP3', callback_data=f'pl:{uid}:audio:0')],
+        [InlineKeyboardButton('🎬 最高画质视频', callback_data=f'pl:{uid}:video:best')],
     ]
     for h in sorted(SUPPORTED_HEIGHTS):
         buttons.append([InlineKeyboardButton(
@@ -270,6 +271,9 @@ async def _process_playlist_entries(query, info, entries, total, fmt, res):
 
                 if fmt == 'audio':
                     meta = await loop.run_in_executor(None, download_audio, entry['url'])
+                elif res == 'best':
+                    # 最高画质：跳过 get_formats，直接 bestvideo+bestaudio
+                    meta = await loop.run_in_executor(None, download_video, entry['url'], 'best')
                 else:
                     fmts = await loop.run_in_executor(None, get_formats, entry['url'])
                     target_h = int(res)
@@ -313,9 +317,10 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     entries = info['entries']
     total = len(entries)
 
+    fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
         f"⬇️ 开始下载播放列表：*{info['title']}*\n"
-        f"共 {total} 个，格式：{'音频 MP3' if fmt == 'audio' else f'视频 {res}p'}\n"
+        f"共 {total} 个，格式：{fmt_label}\n"
         f"进度：0/{total}",
         parse_mode='Markdown'
     )
@@ -369,9 +374,10 @@ async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAU
     total = len(failed_entries)
     title = '重试失败项'
 
+    rfmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
         f"🔄 开始重试 {total} 个失败项...\n"
-        f"格式：{'音频 MP3' if fmt == 'audio' else f'视频 {res}p'}\n"
+        f"格式：{rfmt_label}\n"
         f"进度：0/{total}",
         parse_mode='Markdown'
     )
