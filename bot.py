@@ -18,6 +18,22 @@ from uploader import direct_upload, refresh_jwt
 # 每 bot 最多 1 个并发下载+上传任务，防止 Telegram flood control
 _task_semaphore = asyncio.Semaphore(1)
 
+# 全局 YouTube 请求速率限制：每次请求后至少等待 3 秒
+_last_youtube_request = 0.0
+_youtube_request_lock = asyncio.Lock()
+
+
+async def _rate_limit_youtube():
+    """限制 YouTube API 请求频率，每次请求后至少间隔 3 秒。"""
+    global _last_youtube_request
+    async with _youtube_request_lock:
+        now = time.monotonic()
+        elapsed = now - _last_youtube_request
+        min_gap = random.uniform(2.0, 4.0)
+        if elapsed < min_gap:
+            await asyncio.sleep(min_gap - elapsed)
+        _last_youtube_request = time.monotonic()
+
 # 追踪当前正在通过 HTTP 流式传输的文件（磁盘满时紧急清理用）
 _active_streams: set = set()
 
@@ -499,6 +515,9 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
 
     import json
 
+    # 每个任务开始时应用速率限制（非播放列表单次请求），防止连续触发 YouTube 限流
+    await _rate_limit_youtube()
+
     try:
         # ── 播放列表模式：解析列表，逐项下载 ──
         if mode == 'playlist':
@@ -536,7 +555,10 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
                 except Exception:
                     pass  # 检查失败时继续处理，不阻塞下载
 
-                # 每项之间延迟 2-5 秒，避免触发频率限制
+                # 每项开始前应用 YouTube 速率限制
+                await _rate_limit_youtube()
+
+                # 每项之间额外延迟 2-5 秒，避免触发频率限制
                 if i > 1:
                     await asyncio.sleep(random.uniform(2, 5))
 
@@ -624,6 +646,8 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             return
 
         # ── 非播放列表：单个文件下载 ──
+        # 单个文件下载也添加随机延迟，避免短时间内连发
+        await asyncio.sleep(random.uniform(1.0, 3.0))
         await _patch_task(session, task_id, status='processing', progress='下载中...')
         if mode == 'video':
             if not fmt:
@@ -656,6 +680,25 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
         logger.info(f'[{config.BOT_ID}] 任务 #{task_id} 完成，hymn_id={result.get("id")}')
 
     except Exception as e:
+        error_str = str(e)
+        # 检测 YouTube 速率限制，等待更长时间后重试
+        if 'rate-limited' in error_str.lower() or 'rate_limit' in error_str.lower() or '429' in error_str or 'Too Many Requests' in error_str:
+            wait_time = random.uniform(60, 120)
+            logger.warning(f'[{config.BOT_ID}] 任务 #{task_id} 被 YouTube 限流，等待 {wait_time:.0f} 秒后重试...')
+            await _patch_task(session, task_id, progress=f'⚠️ 被限流，等待 {wait_time:.0f} 秒后重试...')
+            await asyncio.sleep(wait_time)
+            # 重置速率限制计时器，让重试能从干净状态开始
+            global _last_youtube_request
+            async with _youtube_request_lock:
+                _last_youtube_request = 0.0
+            # 重新执行任务（递归重试，最多 1 次再尝试）
+            try:
+                await _execute_task(session, task)
+                return
+            except Exception as e2:
+                logger.error(f'[{config.BOT_ID}] 任务 #{task_id} 重试后仍失败: {e2}')
+                error_str = str(e2)
+
         logger.exception(f'[{config.BOT_ID}] 任务 #{task_id} 失败')
         if 'meta' in locals() and meta and 'file_path' in meta:
             try:

@@ -15,6 +15,9 @@ def _base_opts() -> dict:
         'no_warnings': True,
         'noplaylist': True,
         'js_runtimes': {'node': {}},
+        # 随机延迟 2~6 秒，避免触发 YouTube 速率限制
+        'sleep_interval': 2,
+        'max_sleep_interval': 6,
         'extractor_args': {
             'youtube': {
                 'player_client': ['web', 'mweb'],
