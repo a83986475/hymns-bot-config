@@ -34,6 +34,38 @@ async def _rate_limit_youtube():
             await asyncio.sleep(min_gap - elapsed)
         _last_youtube_request = time.monotonic()
 
+# ── YouTube 限流冷却缓存 ──
+_yt_rate_limit_cache: dict[str, float] = {}  # video_id → 首次限流时间戳 (monotonic)
+_YT_RATE_LIMIT_COOLDOWN = 3600  # 冷却 1 小时
+
+
+def _check_yt_rate_limit(url: str) -> str:
+    """检查 URL 是否在限流冷却期内。返回 '' 或错误消息。"""
+    video_id = _get_video_id(url)
+    if not video_id:
+        return ''
+    ts = _yt_rate_limit_cache.get(video_id)
+    if ts is not None:
+        remaining = time.monotonic() - ts
+        if remaining < _YT_RATE_LIMIT_COOLDOWN:
+            left_min = int((_YT_RATE_LIMIT_COOLDOWN - remaining) // 60)
+            return f'视频 {video_id} 仍在 YouTube 限流冷却中（剩余约 {left_min} 分钟）'
+    return ''
+
+
+def _mark_yt_rate_limit(url: str):
+    """标记视频被 YouTube 限流。video_id → 当前时间戳。"""
+    video_id = _get_video_id(url)
+    if video_id:
+        logger.warning(f'🚫 标记限流: {video_id}，冷却 {_YT_RATE_LIMIT_COOLDOWN // 60} 分钟')
+        _yt_rate_limit_cache[video_id] = time.monotonic()
+        # 限制缓存大小，清理过期条目
+        if len(_yt_rate_limit_cache) > 1000:
+            now = time.monotonic()
+            expired = [k for k, v in _yt_rate_limit_cache.items() if now - v > _YT_RATE_LIMIT_COOLDOWN * 2]
+            for k in expired:
+                del _yt_rate_limit_cache[k]
+
 # 追踪当前正在通过 HTTP 流式传输的文件（磁盘满时紧急清理用）
 _active_streams: set = set()
 
@@ -646,6 +678,10 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             return
 
         # ── 非播放列表：单个文件下载 ──
+        # 检查该视频是否在限流冷却中
+        rl_msg = _check_yt_rate_limit(url)
+        if rl_msg:
+            raise Exception(rl_msg)
         # 单个文件下载也添加随机延迟，避免短时间内连发
         await asyncio.sleep(random.uniform(1.0, 3.0))
         await _patch_task(session, task_id, status='processing', progress='下载中...')
@@ -678,26 +714,46 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             result=json.dumps({'id': result.get('id'), 'title': meta.get('title', '')}, ensure_ascii=False)
         )
         logger.info(f'[{config.BOT_ID}] 任务 #{task_id} 完成，hymn_id={result.get("id")}')
-
     except Exception as e:
         error_str = str(e)
-        # 检测 YouTube 速率限制，等待更长时间后重试
-        if 'rate-limited' in error_str.lower() or 'rate_limit' in error_str.lower() or '429' in error_str or 'Too Many Requests' in error_str:
-            wait_time = random.uniform(60, 120)
-            logger.warning(f'[{config.BOT_ID}] 任务 #{task_id} 被 YouTube 限流，等待 {wait_time:.0f} 秒后重试...')
-            await _patch_task(session, task_id, progress=f'⚠️ 被限流，等待 {wait_time:.0f} 秒后重试...')
-            await asyncio.sleep(wait_time)
-            # 重置速率限制计时器，让重试能从干净状态开始
-            global _last_youtube_request
-            async with _youtube_request_lock:
-                _last_youtube_request = 0.0
-            # 重新执行任务（递归重试，最多 1 次再尝试）
-            try:
-                await _execute_task(session, task)
-                return
-            except Exception as e2:
-                logger.error(f'[{config.BOT_ID}] 任务 #{task_id} 重试后仍失败: {e2}')
-                error_str = str(e2)
+        # ── 检测 YouTube 限流 → 递增重试（全部耗尽后才标记缓存）──
+        is_rate_limit = any(k in error_str.lower() for k in ['rate-limited', 'rate_limit', '429', 'too many requests'])
+
+        if is_rate_limit:
+            max_retries = 3
+            for retry in range(max_retries):
+                base_wait = 60 * (retry + 1)
+                wait_time = random.uniform(base_wait, base_wait * 1.5)
+                logger.warning(
+                    f'[{config.BOT_ID}] 任务 #{task_id} 被 YouTube 限流，'
+                    f'第 {retry+1}/{max_retries} 次重试，等待 {wait_time:.0f} 秒...'
+                )
+                await _patch_task(
+                    session, task_id,
+                    progress=f'⚠️ 被限流，第 {retry+1}/{max_retries} 次重试（等待 {wait_time:.0f} 秒）...'
+                )
+                await asyncio.sleep(wait_time)
+                # 重置请求间隔计时器
+                global _last_youtube_request
+                async with _youtube_request_lock:
+                    _last_youtube_request = 0.0
+                # 再次尝试
+                try:
+                    await _execute_task(session, task)
+                    return
+                except Exception as e2:
+                    e2_str = str(e2)
+                    if any(k in e2_str.lower() for k in ['rate-limited', 'rate_limit', '429', 'too many requests']):
+                        logger.warning(
+                            f'[{config.BOT_ID}] 任务 #{task_id} 第 {retry+1} 次重试后仍限流'
+                        )
+                        continue
+                    else:
+                        error_str = e2_str
+                        break
+            else:
+                # 所有重试耗尽 → 标记限流缓存，禁止后续任务再请求该视频
+                _mark_yt_rate_limit(url)
 
         logger.exception(f'[{config.BOT_ID}] 任务 #{task_id} 失败')
         if 'meta' in locals() and meta and 'file_path' in meta:
@@ -705,7 +761,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
                 os.remove(meta['file_path'])
             except Exception:
                 pass
-        await _patch_task_retry(session, task_id, status='failed', error=str(e)[:500])
+        await _patch_task_retry(session, task_id, status='failed', error=error_str[:500])
 
 async def _execute_task_with_semaphore(session, task):
     async with _task_semaphore:
