@@ -148,7 +148,15 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
                 raise Exception(f"TG 上传失败：{result.get('description', 'unknown error')}")
 
             if is_video:
-                return {"file_id": result["result"]["document"]["file_id"], "b": _bot_index}
+                msg = result["result"]
+                file_id = None
+                if "document" in msg and msg["document"]:
+                    file_id = msg["document"].get("file_id")
+                if not file_id and "video" in msg and msg["video"]:
+                    file_id = msg["video"].get("file_id")
+                if not file_id:
+                    raise Exception(f"TG 返回中没有 file_id (document/video 都缺失): {list(msg.keys())}")
+                return {"file_id": file_id, "b": _bot_index}
             else:
                 return {"file_id": result["result"]["audio"]["file_id"], "b": _bot_index}
 
