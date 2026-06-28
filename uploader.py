@@ -1,8 +1,10 @@
 import asyncio
+import subprocess
 import httpx
 import math
 import os
 import random
+import tempfile
 from config import config
 
 # 分片大小：18MB
@@ -189,6 +191,52 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
     sha256 = metadata.get("sha256")
     mime_type = metadata.get("mime_type", "audio/mpeg")
     is_video = mime_type and mime_type.startswith("video/")
+
+    # ── MP4 faststart：将 moov atom 移到文件开头，优化浏览器播放启动速度 ──
+    # 仅对 MP4 视频文件执行（使用 ffmpeg -c copy 无需重新编码，仅移动元数据）
+    if is_video and fname.lower().endswith('.mp4'):
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            import subprocess
+            import tempfile
+            # 用临时文件存储处理后的视频
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.mp4')
+            os.close(tmp_fd)
+            result = subprocess.run(
+                ['ffmpeg', '-i', file_path, '-c', 'copy', '-movflags', '+faststart', '-y', tmp_path],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                # 用处理后的文件替换原文件
+                orig_path = file_path
+                os.remove(orig_path)
+                os.rename(tmp_path, orig_path)
+                # 更新文件大小
+                file_size = os.path.getsize(orig_path)
+                logger.info(f'faststart 优化完成: {fname}')
+            else:
+                logger.warning(f'faststart 失败 (returncode={result.returncode}): {result.stderr[:200]}')
+                # 清理临时文件
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        except FileNotFoundError:
+            # ffmpeg 不可用，跳过 faststart
+            pass
+        except subprocess.TimeoutExpired:
+            logger.warning(f'faststart 超时: {fname}')
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f'faststart 处理失败: {e}')
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
     # 秒传检测：有 sha256 才检测，命中则跳过 TG 上传
     if sha256:
