@@ -738,7 +738,7 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             await _patch_task(session, task_id, progress=f'上传到 Telegram CDN（{size_mb:.1f} MB）...')
 
             try:
-                result = await direct_upload(meta['file_path'], meta, uploader_id=task.get('user_id'))
+                result = await direct_upload(meta['file_path'], meta, uploader_id=task.get('user_id'), skip_import=True)
             except Exception as e:
                 try:
                     os.remove(meta['file_path'])
@@ -753,18 +753,21 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             except Exception:
                 pass
 
-            hymn_id = result.get('id')
             await _patch_task_retry(
                 session, task_id,
                 status='done',
                 progress='完成',
                 title=meta.get('title', ''),
                 result=json.dumps({
-                    'id': hymn_id,
+                    'file_parts': result.get('file_parts'),
+                    'file_name': result.get('file_name', ''),
+                    'file_size': result.get('file_size', 0),
                     'title': meta.get('title', ''),
+                    'duration': meta.get('duration', 0),
+                    'mime_type': result.get('mime_type', 'audio/mpeg'),
                 }, ensure_ascii=False)
             )
-            logger.info(f'[{config.BOT_ID}] youtube_direct_tg 任务 #{task_id} 完成，hymn_id={hymn_id}')
+            logger.info(f'[{config.BOT_ID}] youtube_direct_tg 任务 #{task_id} 完成，上传到 Telegram CDN')
             return
 
         # ── 非播放列表：单个文件下载 ──

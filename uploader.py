@@ -175,17 +175,17 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
     raise Exception(f"分片 {chunk_name} 上传重试 {max_retries} 次后仍失败")
 
 
-async def direct_upload(file_path: str, metadata: dict, uploader_id: int = None) -> dict:
+async def direct_upload(file_path: str, metadata: dict, uploader_id: int = None, skip_import: bool = False) -> dict:
     """
-    直连模式：Bot 直接把文件分片上传到 Telegram Cloud API，
-    然后只调用 Worker 写一条 D1 记录。
+    直连模式：Bot 直接把文件分片上传到 Telegram Cloud API。
+    当 skip_import=True 时只上传到 Telegram CDN，不创建 D1 记录。
     文件 > 10MB 时自动分片，每片单独 sendDocument/sendAudio。
     429 自动重试（递增退避 + 随机 jitter）。
     """
-    return await _do_upload(file_path, metadata, uploader_id)
+    return await _do_upload(file_path, metadata, uploader_id, skip_import)
 
 
-async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) -> dict:
+async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, skip_import: bool = False) -> dict:
     fname = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
     sha256 = metadata.get("sha256")
@@ -290,4 +290,15 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None) ->
 
     if uploader_id is not None:
         metadata["uploader_id"] = uploader_id
+
+    if skip_import:
+        return {
+            "file_parts": file_parts,
+            "file_name": fname,
+            "file_size": file_size,
+            "title": metadata.get("title", fname),
+            "duration": metadata.get("duration", 0),
+            "mime_type": mime_type,
+        }
+
     return await _post_import(metadata, file_parts, file_size, fname)
