@@ -715,6 +715,58 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
             )
             return
 
+        # ── youtube_direct_tg 模式：下载后上传到 Telegram CDN，入库到诗歌本 ──
+        if mode == 'youtube_direct_tg':
+            await _patch_task(session, task_id, status='processing', progress='下载中...')
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+            try:
+                if fmt and fmt != 'audio':
+                    meta = await loop.run_in_executor(None, download_video, url, fmt)
+                else:
+                    meta = await loop.run_in_executor(None, download_audio, url)
+            except Exception as e:
+                await _patch_task_retry(session, task_id, status='failed', error=f'下载失败：{str(e)[:300]}')
+                logger.exception(f'[{config.BOT_ID}] youtube_direct_tg 任务 #{task_id} 下载失败')
+                return
+
+            meta['category'] = category
+            folder_id = task.get('folder_id')
+            if folder_id is not None:
+                meta['folder_id'] = folder_id
+
+            size_mb = os.path.getsize(meta['file_path']) / 1024 / 1024
+            await _patch_task(session, task_id, progress=f'上传到 Telegram CDN（{size_mb:.1f} MB）...')
+
+            try:
+                result = await direct_upload(meta['file_path'], meta, uploader_id=task.get('user_id'))
+            except Exception as e:
+                try:
+                    os.remove(meta['file_path'])
+                except Exception:
+                    pass
+                await _patch_task_retry(session, task_id, status='failed', error=f'上传失败：{str(e)[:300]}')
+                logger.exception(f'[{config.BOT_ID}] youtube_direct_tg 任务 #{task_id} 上传失败')
+                return
+
+            try:
+                os.remove(meta['file_path'])
+            except Exception:
+                pass
+
+            hymn_id = result.get('id')
+            await _patch_task_retry(
+                session, task_id,
+                status='done',
+                progress='完成',
+                title=meta.get('title', ''),
+                result=json.dumps({
+                    'id': hymn_id,
+                    'title': meta.get('title', ''),
+                }, ensure_ascii=False)
+            )
+            logger.info(f'[{config.BOT_ID}] youtube_direct_tg 任务 #{task_id} 完成，hymn_id={hymn_id}')
+            return
+
         # ── 非播放列表：单个文件下载 ──
         # 检查该视频是否在限流冷却中
         rl_msg = _check_yt_rate_limit(url)
