@@ -239,7 +239,8 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, sk
                 pass
 
     # 秒传检测：有 sha256 才检测，命中则跳过 TG 上传
-    if sha256:
+    # skip_import=True（TG CDN 模式）时跳过，因为需要返回 file_parts 供 Worker 代理下载
+    if not skip_import and sha256:
         dup = await check_duplicate(sha256, fname, file_size)
         if dup:
             return {"id": dup.get("id"), "dedup": True, "filename": dup.get("filename")}
