@@ -6,22 +6,6 @@ x-logging: &default-logging
 
 services:
 
-  telegram-bot-api:
-    image: aiogram/telegram-bot-api:latest
-    container_name: telegram-bot-api
-    restart: unless-stopped
-    logging: *default-logging
-    environment:
-      TELEGRAM_API_ID: ${TG_API_ID}
-      TELEGRAM_API_HASH: ${TG_API_HASH}
-      TELEGRAM_LOCAL: 1
-    volumes:
-      - tg-api-data:/var/lib/telegram-bot-api
-    ports:
-      - "127.0.0.1:8081:8081"
-    networks:
-      - botnet
-
   bgutil-ytdlp-pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
     container_name: bgutil-ytdlp-pot-provider
@@ -43,12 +27,13 @@ services:
       - BOT_ID=${BOT0_ID}
       - BOT_INDEX=0
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://172.18.0.1:7890
+      - HTTPS_PROXY=http://172.18.0.1:7890
     volumes:
       - .:/app
     ports:
       - "0.0.0.0:8080:8080"
     depends_on:
-      - telegram-bot-api
       - bgutil-ytdlp-pot-provider
     networks:
       - botnet
@@ -64,10 +49,11 @@ services:
       - BOT_ID=${BOT1_ID}
       - BOT_INDEX=1
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://172.18.0.1:7890
+      - HTTPS_PROXY=http://172.18.0.1:7890
     volumes:
       - .:/app
     depends_on:
-      - telegram-bot-api
       - bgutil-ytdlp-pot-provider
     networks:
       - botnet
@@ -83,10 +69,11 @@ services:
       - BOT_ID=${BOT2_ID}
       - BOT_INDEX=2
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://172.18.0.1:7890
+      - HTTPS_PROXY=http://172.18.0.1:7890
     volumes:
       - .:/app
     depends_on:
-      - telegram-bot-api
       - bgutil-ytdlp-pot-provider
     networks:
       - botnet
@@ -102,10 +89,11 @@ services:
       - BOT_ID=${BOT3_ID}
       - BOT_INDEX=3
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://172.18.0.1:7890
+      - HTTPS_PROXY=http://172.18.0.1:7890
     volumes:
       - .:/app
     depends_on:
-      - telegram-bot-api
       - bgutil-ytdlp-pot-provider
     networks:
       - botnet
@@ -121,10 +109,11 @@ services:
       - BOT_ID=${BOT4_ID}
       - BOT_INDEX=4
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://172.18.0.1:7890
+      - HTTPS_PROXY=http://172.18.0.1:7890
     volumes:
       - .:/app
     depends_on:
-      - telegram-bot-api
       - bgutil-ytdlp-pot-provider
     networks:
       - botnet
@@ -132,6 +121,3 @@ services:
 networks:
   botnet:
     driver: bridge
-
-volumes:
-  tg-api-data:

@@ -1,12 +1,43 @@
 import yt_dlp
 import os
 import hashlib
+import logging
+import socket
+import time
 from config import config
 
 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
 
+logger = logging.getLogger(__name__)
+
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
 POT_PROVIDER_URL = 'http://bgutil-ytdlp-pot-provider:4416'
+POT_PROVIDER_HOST = 'bgutil-ytdlp-pot-provider'
+POT_PROVIDER_PORT = 4416
+
+# POT provider 健康状态缓存（每 60 秒刷新一次，避免每次请求都尝试连接）
+_pot_provider_ok = None
+_pot_provider_last_check = 0.0
+
+
+def _pot_provider_alive() -> bool:
+    """检查 POT provider 是否可达（TCP 端口检测），结果缓存 60 秒。"""
+    global _pot_provider_ok, _pot_provider_last_check
+    now = time.monotonic()
+    if _pot_provider_last_check > 0 and now - _pot_provider_last_check < 60:
+        return _pot_provider_ok if _pot_provider_ok is not None else False
+    _pot_provider_last_check = now
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        result = sock.connect_ex((POT_PROVIDER_HOST, POT_PROVIDER_PORT))
+        sock.close()
+        _pot_provider_ok = (result == 0)
+    except Exception:
+        _pot_provider_ok = False
+    if not _pot_provider_ok:
+        logger.warning('POT provider 不可达（%s:%s），将使用无 POT 模式（yt-dlp 可能更容易触发限流）', POT_PROVIDER_HOST, POT_PROVIDER_PORT)
+    return _pot_provider_ok
 
 
 def _base_opts() -> dict:
@@ -22,11 +53,14 @@ def _base_opts() -> dict:
             'youtube': {
                 'player_client': ['web', 'mweb'],
             },
-            'youtubepot-bgutilhttp': {
-                'base_url': [POT_PROVIDER_URL],
-            },
         },
     }
+    # POT provider 可选：检测到服务可用时才启用
+    if _pot_provider_alive():
+        _logger.info('POT provider 已就绪，启用 yt-dlp POT 支持')
+        opts['extractor_args']['youtubepot-bgutilhttp'] = {
+            'base_url': [POT_PROVIDER_URL],
+        }
     if os.path.exists(COOKIE_FILE):
         opts['cookiefile'] = COOKIE_FILE
     return opts

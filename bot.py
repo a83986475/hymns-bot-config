@@ -11,6 +11,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
 )
+from telegram.helpers import escape_markdown as _esc_md
 from config import config
 from downloader import search_youtube, get_formats, get_playlist_info, download_audio, download_video, SUPPORTED_HEIGHTS, HEIGHT_LABELS
 from uploader import direct_upload, refresh_jwt
@@ -131,13 +132,15 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines, buttons = [], []
         for r in results:
             dur = fmt_dur(r.get('duration'))
-            lines.append(f"`{r['index']}`. {r['title']} [{dur}]\n   _{r['uploader']}_")
+            title = _esc_md(str(r['title']))
+            uploader = _esc_md(str(r.get('uploader', '')))
+            lines.append(f"`{r['index']}`. {title} [{dur}]\n   _{uploader}_")
             buttons.append([InlineKeyboardButton(
                 f"⬇️ {r['index']}. {r['title'][:35]}",
                 callback_data=f"pick:{update.effective_user.id}:{r['index']-1}"
             )])
         await msg.edit_text(
-            f"🎵 *{keyword}* 结果：\n\n" + '\n\n'.join(lines),
+            f"🎵 *{_esc_md(keyword)}* 结果：\n\n" + '\n\n'.join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode='Markdown'
         )
@@ -209,7 +212,7 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )])
 
     await msg.edit_text(
-        f"📋 *{info['title']}*\n"
+        f"📋 *{_esc_md(str(info['title']))}*\n"
         f"🎵 共 {info['count']} 个视频\n"
         f"⏱ 总时长：{total_dur}\n\n"
         f"请选择下载格式：",
@@ -239,7 +242,7 @@ async def _show_format_picker(msg, url: str, uid: int):
         )])
 
     await msg.reply_text(
-        f"🎵 *{info['title']}*\n⏱ {fmt_dur(info['duration'])}\n\n请选择下载格式：",
+        f"🎵 *{_esc_md(str(info['title']))}*\n⏱ {fmt_dur(info['duration'])}\n\n请选择下载格式：",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode='Markdown'
     )
@@ -271,7 +274,7 @@ async def callback_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )])
 
     await query.edit_message_text(
-        f"🎵 *{info['title']}*\n⏱ {fmt_dur(info['duration'])}\n\n请选择下载格式：",
+        f"🎵 *{_esc_md(str(info['title']))}*\n⏱ {fmt_dur(info['duration'])}\n\n请选择下载格式：",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode='Markdown'
     )
@@ -310,13 +313,13 @@ async def _process_playlist_entries(query, info, entries, total, fmt, res):
             try:
                 if attempt > 0:
                     await query.edit_message_text(
-                        f"🔄 重试 {i}/{total} — {entry['title'][:35]}...\n📋 {info['title']}",
+                        f"🔄 重试 {i}/{total} — {_esc_md(str(entry['title'][:35]))}...\n📋 {_esc_md(str(info['title']))}",
                         parse_mode='Markdown'
                     )
                     await asyncio.sleep(2)
 
                 await query.edit_message_text(
-                    f"⬇️ {'重试' if attempt > 0 else '下载'}中 {i}/{total} — {entry['title'][:40]}\n📋 {info['title']}",
+                    f"⬇️ {'重试' if attempt > 0 else '下载'}中 {i}/{total} — {_esc_md(str(entry['title'][:40]))}\n📋 {_esc_md(str(info['title']))}",
                     parse_mode='Markdown'
                 )
 
@@ -370,7 +373,7 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
-        f"⬇️ 开始下载播放列表：*{info['title']}*\n"
+        f"⬇️ 开始下载播放列表：*{_esc_md(str(info['title']))}*\n"
         f"共 {total} 个，格式：{fmt_label}\n"
         f"进度：0/{total}",
         parse_mode='Markdown'
@@ -382,13 +385,13 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 构建最终消息
     result_msg = f"{'✅' if failed == 0 else '⚠️'} *播放列表下载完成*\n\n"
-    result_msg += f"📋 {info['title']}\n"
+    result_msg += f"📋 {_esc_md(str(info['title']))}\n"
     result_msg += f"✅ 成功：{success}\n"
     if failed > 0:
         result_msg += f"❌ 失败：{failed}\n"
         # 列出失败项标题（最多显示 5 个，避免消息过长）
         for item in failed_items[:5]:
-            result_msg += f"   • {item['title'][:40]}\n"
+            result_msg += f"   • {_esc_md(str(item['title'][:40]))}\n"
         if len(failed_items) > 5:
             result_msg += f'   … 还有 {len(failed_items) - 5} 项\n'
 
@@ -444,7 +447,7 @@ async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAU
     if failed > 0:
         result_msg += f"❌ 失败：{failed}\n"
         for item in failed_items2[:5]:
-            result_msg += f"   • {item['title'][:40]}\n"
+            result_msg += f"   • {_esc_md(str(item['title'][:40]))}\n"
         if len(failed_items2) > 5:
             result_msg += f'   … 还有 {len(failed_items2) - 5} 项\n'
 
@@ -492,10 +495,10 @@ async def _do_download_and_upload(msg, url: str, metadata: dict, fmt: str, fmt_i
 
         await msg.edit_text(
             f"✅ *上传成功！*\n\n"
-            f"🎵 {meta['title']}\n"
-            f"📂 {meta.get('category', config.DEFAULT_CATEGORY)}\n"
+            f"🎵 {_esc_md(str(meta['title']))}\n"
+            f"📂 {_esc_md(str(meta.get('category', config.DEFAULT_CATEGORY)))}\n"
             f"⏱ {fmt_dur(meta.get('duration'))}\n"
-            f"🆔 ID：`{result.get('id', '?')}`",
+            f"🆔 ID：`{_esc_md(str(result.get('id', '?')))}`",
             parse_mode='Markdown'
         )
     except Exception as e:
@@ -678,6 +681,38 @@ async def _execute_task(session: aiohttp.ClientSession, task: dict):
                     result=json.dumps(result_data, ensure_ascii=False)
                 )
                 logger.info(f'[{config.BOT_ID}] 播放列表任务 #{task_id} 完成: {summary}')
+            return
+
+        # ── youtube_direct 模式：下载到磁盘，不上传 Telegram，用户自行下载 ──
+        if mode == 'youtube_direct':
+            await _patch_task(session, task_id, status='processing', progress='下载中...')
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+            try:
+                if fmt and fmt != 'audio':
+                    meta = await loop.run_in_executor(None, download_video, url, fmt)
+                else:
+                    meta = await loop.run_in_executor(None, download_audio, url)
+            except Exception as e:
+                await _patch_task_retry(session, task_id, status='failed', error=f'下载失败：{str(e)[:300]}')
+                logger.exception(f'[{config.BOT_ID}] youtube_direct 任务 #{task_id} 下载失败')
+                return
+
+            file_name = os.path.basename(meta['file_path'])
+            file_size = os.path.getsize(meta['file_path'])
+            logger.info(f'[{config.BOT_ID}] youtube_direct 任务 #{task_id} 下载完成: {file_name} ({file_size/1024/1024:.1f} MB)')
+
+            # 不上传 Telegram，保留文件在磁盘上由 _cleanup_temp_dir 清理
+            await _patch_task_retry(
+                session, task_id,
+                status='done',
+                progress='完成',
+                title=meta.get('title', ''),
+                result=json.dumps({
+                    'file_name': file_name,
+                    'file_size': file_size,
+                    'title': meta.get('title', ''),
+                }, ensure_ascii=False)
+            )
             return
 
         # ── 非播放列表：单个文件下载 ──
@@ -925,6 +960,154 @@ async def _handle_formats_http(request: aiohttp_web.Request):
         logger.error(f'获取格式异常: {e}')
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
+async def _handle_download_file_http(request: aiohttp_web.Request):
+    """提供已缓存文件的直接下载（youtube_direct 模式）。
+    文件已在磁盘上，响应即时，不存在 yt-dlp 长时间预处理的问题。
+    """
+    if not await _check_search_auth(request):
+        return aiohttp_web.Response(status=401, text='Unauthorized')
+
+    # 从 ticket 验证结果中获取 task_id
+    task_id = None
+    if hasattr(request, '_ticket_data') and request._ticket_data:
+        td = request._ticket_data
+        # 只处理 file_download 类型的 ticket
+        if td.get('format') == 'file_download':
+            try:
+                task_id = int(td.get('url', '0'))
+            except (ValueError, TypeError):
+                pass
+
+    if not task_id:
+        return aiohttp_web.Response(
+            status=403,
+            text='无效的下载凭证',
+            content_type='text/plain; charset=utf-8'
+        )
+
+    # 从 Worker API 获取任务详情，提取 file_name
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{config.CF_WORKER_URL}/api/bot/tasks/{task_id}/result-detail",
+                headers={'X-Admin-Token': config.CF_API_KEY},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f'获取任务详情失败: {resp.status} task_id={task_id}')
+                    return aiohttp_web.Response(text='获取任务详情失败', status=502, content_type='text/plain; charset=utf-8')
+                task_data = await resp.json()
+    except Exception as e:
+        logger.warning(f'获取任务详情异常: {e}')
+        return aiohttp_web.Response(text='获取任务详情异常', status=502, content_type='text/plain; charset=utf-8')
+
+    if task_data.get('status') != 'done':
+        return aiohttp_web.Response(text='任务尚未完成', status=409, content_type='text/plain; charset=utf-8')
+
+    # 解析 result JSON 获取文件信息
+    import json
+    try:
+        result_data = json.loads(task_data.get('result', '{}'))
+    except (json.JSONDecodeError, TypeError):
+        result_data = {}
+
+    file_name = result_data.get('file_name', '')
+    file_size = result_data.get('file_size', 0)
+    file_title = result_data.get('title', '下载文件')
+
+    if not file_name:
+        return aiohttp_web.Response(text='文件信息缺失', status=404, content_type='text/plain; charset=utf-8')
+
+    file_path = os.path.join(config.DOWNLOAD_DIR, file_name)
+
+    if not os.path.exists(file_path):
+        logger.warning(f'缓存文件不存在: {file_path}')
+        return aiohttp_web.Response(text='缓存文件已过期，请重新下载', status=410, content_type='text/plain; charset=utf-8')
+
+    # 确定 Content-Type
+    ext = os.path.splitext(file_name)[1].lower()
+    if ext == '.mp3':
+        content_type = 'audio/mpeg'
+    elif ext == '.mp4':
+        content_type = 'video/mp4'
+    else:
+        content_type = 'application/octet-stream'
+
+    actual_size = os.path.getsize(file_path)
+    loop = asyncio.get_event_loop()
+
+    # ── 解析 Range 请求头（支持断点续传）──
+    range_header = request.headers.get('Range', '')
+    if range_header:
+        m = re.match(r'bytes=(\d+)-(\d*)', range_header)
+        if m:
+            start = int(m.group(1))
+            end_str = m.group(2)
+            end = int(end_str) if end_str else actual_size - 1
+
+            if start >= actual_size:
+                return aiohttp_web.Response(
+                    status=416,
+                    headers={'Content-Range': f'bytes */{actual_size}'},
+                    text='Range Not Satisfiable'
+                )
+
+            end = min(end, actual_size - 1)
+            content_length = end - start + 1
+
+            resp = aiohttp_web.StreamResponse(
+                status=206,
+                headers={
+                    'Content-Type': content_type,
+                    'Content-Disposition': f'attachment; filename="{file_name}"',
+                    'Content-Length': str(content_length),
+                    'Content-Range': f'bytes {start}-{end}/{actual_size}',
+                    'Accept-Ranges': 'bytes',
+                }
+            )
+            await resp.prepare(request)
+
+            _active_streams.add(file_path)
+            try:
+                with open(file_path, 'rb') as f:
+                    f.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = await loop.run_in_executor(None, f.read, chunk_size)
+                        if not chunk:
+                            break
+                        await resp.write(chunk)
+                        remaining -= len(chunk)
+                await resp.write_eof()
+            finally:
+                _active_streams.discard(file_path)
+            return resp
+
+    # ── 返回完整文件 ──
+    resp = aiohttp_web.StreamResponse(
+        headers={
+            'Content-Type': content_type,
+            'Content-Disposition': f'attachment; filename="{file_name}"',
+            'Content-Length': str(actual_size),
+            'Accept-Ranges': 'bytes',
+        }
+    )
+    await resp.prepare(request)
+
+    _active_streams.add(file_path)
+    try:
+        with open(file_path, 'rb') as f:
+            chunk = await loop.run_in_executor(None, f.read, 65536)
+            while chunk:
+                await resp.write(chunk)
+                chunk = await loop.run_in_executor(None, f.read, 65536)
+        await resp.write_eof()
+    finally:
+        _active_streams.discard(file_path)
+    return resp
+
+
 async def _handle_download_http(request: aiohttp_web.Request):
     """下载 YouTube 视频并流式返回文件（支持缓存 + Range 断点续传）。
 
@@ -936,7 +1119,26 @@ async def _handle_download_http(request: aiohttp_web.Request):
     5. 文件不自动删除，由 _cleanup_temp_dir 定时清理（30 分钟阈值）
     """
     if not await _check_search_auth(request):
-        return aiohttp_web.Response(status=401, text='Unauthorized')
+        logger.warning('下载请求认证失败（ticket 无效/过期或 Worker 不可达）')
+        return aiohttp_web.Response(
+            status=401,
+            text='''<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>下载失败</title>
+<style>
+  body {{ font-family: -apple-system, "Noto Sans SC", sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #fafafa; color: #333; }}
+  .card {{ background: #fff; border-radius: 12px; padding: 2rem; max-width: 480px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); text-align: center; }}
+  .icon {{ font-size: 3rem; margin-bottom: 0.5rem; }}
+  h2 {{ margin: 0.5rem 0; font-size: 1.2rem; }}
+  .err {{ color: #dc2626; font-size: 0.85rem; background: #fef2f2; padding: 0.75rem; border-radius: 8px; margin: 1rem 0; }}
+</style></head>
+<body><div class="card">
+  <div class="icon">🔒</div>
+  <h2>下载凭证无效或已过期</h2>
+  <div class="err">请返回下载页面重新点击下载按钮获取新的凭证。</div>
+</div></body></html>''',
+            content_type='text/html; charset=utf-8'
+        )
 
     # 优先使用 ticket 验证通过时携带的参数（防御深度：防止 URL 参数被篡改）
     if hasattr(request, '_ticket_data') and request._ticket_data:
@@ -1088,7 +1290,29 @@ async def _handle_download_http(request: aiohttp_web.Request):
 
     except Exception as e:
         logger.exception(f'下载处理失败: {url}')
-        return aiohttp_web.json_response({'error': str(e)[:500]}, status=500)
+        import html as _html
+        err_msg = _html.escape(str(e)[:500])
+        # 返回 HTML 错误页而非 JSON，让用户在新标签中看到具体的错误信息
+        html_error = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>下载失败</title>
+<style>
+  body {{ font-family: -apple-system, "Noto Sans SC", sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #fafafa; color: #333; }}
+  .card {{ background: #fff; border-radius: 12px; padding: 2rem; max-width: 480px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); text-align: center; }}
+  .icon {{ font-size: 3rem; margin-bottom: 0.5rem; }}
+  h2 {{ margin: 0.5rem 0; font-size: 1.2rem; }}
+  .err {{ color: #dc2626; font-size: 0.88rem; background: #fef2f2; padding: 0.75rem; border-radius: 8px; margin: 1rem 0; word-break: break-word; text-align: left; }}
+  .hint {{ font-size: 0.82rem; color: #6b7280; }}
+  .btn {{ display: inline-block; margin-top: 1rem; padding: 0.5rem 1.2rem; background: #1a3a2a; color: #fff; border-radius: 6px; text-decoration: none; font-size: 0.88rem; }}
+</style></head>
+<body><div class="card">
+  <div class="icon">❌</div>
+  <h2>下载处理失败</h2>
+  <div class="err">{err_msg}</div>
+  <p class="hint">请检查 YouTube 链接是否有效，或稍后重试。</p>
+  <a class="btn" href="javascript:window.close()">关闭此页</a>
+</div></body></html>'''
+        return aiohttp_web.Response(text=html_error, status=500, content_type='text/html; charset=utf-8')
     # 文件不自动删除，由 _cleanup_temp_dir 定时清理（.mp3/.mp4 超过 30 分钟自动删除）
 
 
@@ -1144,6 +1368,7 @@ async def _start_search_server():
         app = aiohttp_web.Application()
         app.router.add_get('/search', _handle_search_http)
         app.router.add_get('/download', _handle_download_http)
+        app.router.add_get('/download-file', _handle_download_file_http)
         app.router.add_get('/formats', _handle_formats_http)
         runner = aiohttp_web.AppRunner(app)
         await runner.setup()
