@@ -1458,8 +1458,8 @@ async def _cleanup_temp_dir():
                 if not os.path.isfile(fpath):
                     continue
                 age = now - os.path.getmtime(fpath)
-                # .part 或 .ytdl 等临时后缀 → 超过 10 分钟即删除
-                if fname.endswith(('.part', '.ytdl', '.fragment', '.temp')) and age > 600:
+                # .part 或 .ytdl 等临时后缀 → 超过 30 分钟即删除（跳过正在传输的）
+                if fname.endswith(('.part', '.ytdl', '.fragment', '.temp')) and age > 1800 and fpath not in _active_streams:
                     os.remove(fpath)
                     cleaned += 1
                 # 已完成但未清理的 .mp3/.mp4 → 超过 30 分钟删除（跳过正在传输的）

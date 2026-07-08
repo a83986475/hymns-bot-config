@@ -57,7 +57,7 @@ def _base_opts() -> dict:
     }
     # POT provider 可选：检测到服务可用时才启用
     if _pot_provider_alive():
-        _logger.info('POT provider 已就绪，启用 yt-dlp POT 支持')
+        logger.info('POT provider 已就绪，启用 yt-dlp POT 支持')
         opts['extractor_args']['youtubepot-bgutilhttp'] = {
             'base_url': [POT_PROVIDER_URL],
         }
