@@ -220,6 +220,107 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+
+async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """下载整个 YouTube 频道并自动上传到 Telegram。
+    yt-dlp 的 get_playlist_info 可直接处理频道 URL（/@ /channel/UC...），
+    复用已有的 playlist 下载 + 上传流程。
+    """
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args:
+        await update.effective_message.reply_text(
+            '用法：/channel https://youtube.com/@channelname\n'
+            '例：/channel https://www.youtube.com/@LigonierMinistries'
+        )
+        return
+    url = ctx.args[0]
+    uid = update.effective_user.id
+    msg = await update.effective_message.reply_text('🔍 正在解析频道...')
+    loop = asyncio.get_event_loop()
+    try:
+        info = await loop.run_in_executor(None, get_playlist_info, url)
+    except Exception as e:
+        await msg.edit_text(f'❌ 解析频道失败：{e}'); return
+
+    if not info['entries']:
+        await msg.edit_text('❌ 频道为空或无法获取视频列表'); return
+
+    _cache_put(playlist_cache, uid, info)
+    total_dur = fmt_dur(info['total_duration'])
+    total = info['count']
+
+    # 频道通常很大，提示确认后才开始
+    buttons = [
+        [InlineKeyboardButton(f'✅ 下载全部音频 ({total} 个)', callback_data=f'ch:{uid}:audio:0')],
+    ]
+    if total <= 50:
+        buttons.append([InlineKeyboardButton(
+            '🎬 最高画质视频', callback_data=f'ch:{uid}:video:best'
+        )])
+
+    await msg.edit_text(
+        f"📺 *{_esc_md(str(info['title']))}*\n"
+        f"🎵 共 {total} 个视频\n"
+        f"⏱ 总时长：{total_dur}\n"
+        f"📂 分类：`油管上传`\n\n"
+        f"频道通常较大，确认后自动开始下载并上传到 Telegram。",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode='Markdown'
+    )
+
+
+async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """频道下载回调：复用播放列表的处理逻辑。"""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(':')
+    uid, fmt, res = int(parts[1]), parts[2], parts[3]
+
+    if uid not in playlist_cache:
+        await query.edit_message_text('❌ 缓存已过期，请重新发送链接'); return
+
+    info = playlist_cache[uid]
+    entries = info['entries']
+    total = len(entries)
+
+    fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
+    await query.edit_message_text(
+        f"⬇️ 开始下载频道：*{_esc_md(str(info['title']))}*\n"
+        f"共 {total} 个，格式：{fmt_label}\n"
+        f"进度：0/{total}",
+        parse_mode='Markdown'
+    )
+
+    success, failed, failed_items = await _process_playlist_entries(
+        query, info, entries, total, fmt, res
+    )
+
+    result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
+    result_msg += f"📺 {_esc_md(str(info['title']))}\n"
+    result_msg += f"✅ 成功：{success}\n"
+    if failed > 0:
+        result_msg += f"❌ 失败：{failed}\n"
+        for item in failed_items[:5]:
+            result_msg += f"   • {_esc_md(str(item['title'][:40]))}\n"
+        if len(failed_items) > 5:
+            result_msg += f'   … 还有 {len(failed_items) - 5} 项\n'
+
+    buttons = []
+    if failed > 0:
+        if 'failed_items' not in playlist_cache:
+            _cache_put(playlist_cache, 'failed_items', {})
+        playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items}
+        buttons.append([InlineKeyboardButton(
+            f'🔄 重试失败项 ({failed})',
+            callback_data=f'rch:{uid}:{fmt}:{res}'
+        )])
+
+    await query.edit_message_text(
+        result_msg,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        parse_mode='Markdown'
+    )
+
 # ──────────────────格式选择──────────────────
 
 async def _show_format_picker(msg, url: str, uid: int):
@@ -1496,6 +1597,7 @@ async def post_init(app):
         BotCommand('auto',     '自动下载第一个结果（音频）'),
         BotCommand('add',      '直接上传指定链接'),
         BotCommand('playlist', '下载整个播放列表'),
+        BotCommand('channel', '下载整个频道（音频）'),
         BotCommand('category', '指定分类上传'),
     ])
     logger.info(f'🎵 赞美诗 Bot 已启动（{config.BOT_ID}）')
@@ -1517,10 +1619,13 @@ def main():
     app.add_handler(CommandHandler('add',      cmd_add))
     app.add_handler(CommandHandler('category', cmd_category))
     app.add_handler(CommandHandler('playlist', cmd_playlist))
+    app.add_handler(CommandHandler('channel', cmd_channel))
     app.add_handler(CallbackQueryHandler(callback_pick,     pattern=r'^pick:'))
     app.add_handler(CallbackQueryHandler(callback_format,   pattern=r'^fmt:'))
     app.add_handler(CallbackQueryHandler(callback_playlist, pattern=r'^pl:'))
     app.add_handler(CallbackQueryHandler(callback_retry_playlist_failed, pattern=r'^rpl:'))
+    app.add_handler(CallbackQueryHandler(callback_channel, pattern=r'^ch:'))
+    app.add_handler(CallbackQueryHandler(callback_retry_playlist_failed, pattern=r'^rch:'))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
