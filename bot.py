@@ -343,7 +343,7 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total = len(entries)
     loop = asyncio.get_event_loop()
 
-    # chpl: → 按播放列表组织
+    # chpl: → 按播放列表组织（管道模式：下载+上传并行）
     if query.data.startswith('chpl:'):
         if not playlists:
             await query.edit_message_text('❌ 未发现播放列表'); return
@@ -352,7 +352,7 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📂 按播放列表下载：*{_esc_md(str(channel_title))}*\n"
             f"共 {len(playlists)} 个播放列表\n"
             f"格式：{fmt_label}\n"
-            f"正在逐一下载每个播放列表...",
+            f"⚡ 管道模式：下载同时上传，磁盘峰值仅 2 个文件",
             parse_mode='Markdown'
         )
 
@@ -363,12 +363,6 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pl_safe = re.sub(r'[<>:"/\\|?*]', '_', str(pl['title'])).strip().rstrip(' .') or pl['id']
             subdir = os.path.join(channel_safe, pl_safe)
 
-            await query.edit_message_text(
-                f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
-                f"✅ 已完成：{total_success} | ❌ 失败：{total_failed}",
-                parse_mode='Markdown'
-            )
-
             try:
                 pl_info = await loop.run_in_executor(None, get_playlist_info, pl['url'])
             except Exception as e:
@@ -378,37 +372,32 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not pl_info.get('entries'):
                 continue
 
-            for i, entry in enumerate(pl_info['entries'], 1):
-                try:
-                    if fmt == 'audio':
-                        meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir)
-                    else:
-                        meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
-                    meta['category'] = '油管上传'
+            pl_entries = pl_info['entries']
+            prev_s = total_success
+            prev_f = total_failed
 
-                    result = await direct_upload(meta['file_path'], meta)
-                    try:
-                        os.remove(meta['file_path'])
-                    except Exception:
-                        pass
-                    total_success += 1
+            # 此播放列表的进度回调（默认参数捕获当前循环变量，避免闭包陷阱）
+            async def _pl_progress(s, f, cur, total_in_pl,
+                                   _idx=pl_idx, _pl_title=pl['title'],
+                                   _prev_s=prev_s, _prev_f=prev_f):
+                await query.edit_message_text(
+                    f"📂 播放列表 {_idx}/{len(playlists)}：{_esc_md(str(_pl_title))}\n"
+                    f"进度：{cur}/{total_in_pl} | "
+                    f"✅ {_prev_s + s} | ❌ {_prev_f + f}\n"
+                    f"⚡ 管道模式：下载+上传并行，磁盘峰值 2 个文件",
+                    parse_mode='Markdown'
+                )
 
-                    # 每 5 项更新一次进度
-                    if i % 5 == 0 or i == len(pl_info['entries']):
-                        await query.edit_message_text(
-                            f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
-                            f"进度：{i}/{len(pl_info['entries'])} | "
-                            f"✅ {total_success} | ❌ {total_failed}",
-                            parse_mode='Markdown'
-                        )
+            _pl_s, _pl_f, _pl_items = await _pipeline_process_entries(
+                pl_entries, fmt, res,
+                subdir_fn=lambda e, i: subdir,
+                progress_cb=_pl_progress,
+                loop=loop,
+            )
 
-                    # 每项之间延迟
-                    await asyncio.sleep(random.uniform(1, 3))
-
-                except Exception as e:
-                    logger.warning(f'[{pl["title"]}] 第{i}项失败: {e}')
-                    total_failed += 1
-                    all_failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+            total_success += _pl_s
+            total_failed += _pl_f
+            all_failed_items.extend(_pl_items)
 
         result_msg = f"{'✅' if total_failed == 0 else '⚠️'} *频道按播放列表下载完成*\n\n"
         result_msg += f"📺 {_esc_md(str(channel_title))}\n"
@@ -419,47 +408,30 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(result_msg, parse_mode='Markdown')
         return
 
-    # ch: → 平铺下载（不按播放列表组织）
+    # ch: → 平铺下载（管道模式：下载+上传并行）
     fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
         f"⬇️ 开始下载频道：*{_esc_md(str(channel_title))}*\n"
         f"共 {total} 个，格式：{fmt_label}\n"
-        f"进度：0/{total}\n"
+        f"⚡ 管道模式：下载同时上传，磁盘峰值仅 2 个文件\n"
         f"📂 按频道名组织目录",
         parse_mode='Markdown'
     )
 
-    success, failed = 0, 0
-    failed_items = []
-    for i, entry in enumerate(entries, 1):
-        if i > 1:
-            await asyncio.sleep(random.uniform(2, 5))
+    async def _ch_progress(s, f, cur, total_):
+        await query.edit_message_text(
+            f"⬇️ 频道下载中：{_esc_md(str(channel_title))}\n"
+            f"进度：{cur}/{total_} | ✅ {s} | ❌ {f}\n"
+            f"⚡ 管道模式：下载+上传并行，磁盘峰值 2 个文件",
+            parse_mode='Markdown'
+        )
 
-        try:
-            await query.edit_message_text(
-                f"⬇️ 下载 {i}/{total} — {_esc_md(str(entry['title'][:40]))}",
-                parse_mode='Markdown'
-            )
-
-            subdir = channel_safe
-            if fmt == 'audio':
-                meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir)
-            elif res == 'best':
-                meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
-            else:
-                meta = await loop.run_in_executor(None, download_video, entry['url'], res, subdir)
-            meta['category'] = '油管上传'
-
-            result = await direct_upload(meta['file_path'], meta)
-            try:
-                os.remove(meta['file_path'])
-            except Exception:
-                pass
-            success += 1
-        except Exception as e:
-            logger.error(f'频道第{i}项失败: {e}')
-            failed += 1
-            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+    success, failed, failed_items = await _pipeline_process_entries(
+        entries, fmt, res,
+        subdir_fn=lambda e, i: channel_safe,
+        progress_cb=_ch_progress,
+        loop=loop,
+    )
 
     result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
     result_msg += f"📺 {_esc_md(str(channel_title))}\n"
@@ -545,6 +517,125 @@ async def callback_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"⬇️ 下载中：{'音频 MP3' if fmt == 'audio' else f'视频 {fmt_id}p'}\n🎵 {info['title']}..."
     )
     await _do_download_and_upload(query.message, url, {}, fmt, fmt_id if fmt == 'video' else None)
+
+async def _pipeline_process_entries(
+    entries: list,
+    fmt: str,
+    res: str,
+    subdir_fn,
+    progress_cb,
+    loop,
+    category: str = '油管上传',
+) -> tuple:
+    """
+    管道处理：下载 N+1 的同时上传 N，任何时候磁盘上最多 2 个文件。
+
+    Args:
+        entries: [{url, title, ...}]
+        fmt: 'audio' / 'video'
+        res: format_id 或 'best'
+        subdir_fn: callable(entry, idx) → subdir 字符串
+        progress_cb: callable(success, failed, current, total) → None
+        loop: asyncio 事件循环
+        category: 入库分类
+
+    Returns:
+        (success, failed, failed_items)
+    """
+    n = len(entries)
+    if n == 0:
+        return 0, 0, []
+
+    success, failed = 0, 0
+    failed_items = []
+
+    _MAX_RETRIES = 1  # 下载失败自动重试一次
+
+    # ── 单个任务的下载协程工厂（含格式发现和重试）──
+    async def _dl(entry, idx):
+        subdir = subdir_fn(entry, idx) if subdir_fn else ''
+        if fmt == 'audio':
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    return await loop.run_in_executor(None, download_audio, entry['url'], subdir)
+                except Exception as e:
+                    if attempt < _MAX_RETRIES:
+                        logger.warning(f'音频下载重试 #{idx}: {e}')
+                        await asyncio.sleep(2)
+                    else:
+                        raise
+        else:
+            # 视频格式：非预设分辨率时需要先 get_formats 找 format_id
+            if res in ('best', '1080', '720') or res.startswith('best'):
+                fmt_id = res
+            else:
+                fmt_id = res
+                try:
+                    fmts = await loop.run_in_executor(None, get_formats, entry['url'])
+                    target_h = int(res)
+                    matched = next((f for f in fmts['video_formats'] if f['height'] == target_h), None)
+                    if matched:
+                        fmt_id = matched['format_id']
+                except Exception:
+                    pass
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    return await loop.run_in_executor(None, download_video, entry['url'], fmt_id, subdir)
+                except Exception as e:
+                    if attempt < _MAX_RETRIES:
+                        logger.warning(f'视频下载重试 #{idx}: {e}')
+                        await asyncio.sleep(2)
+                    else:
+                        raise
+
+    # 预启动第一个下载
+    download_task = asyncio.create_task(_dl(entries[0], 0))
+
+    for i in range(n):
+        entry = entries[i]
+
+        # 1. 等待当前下载完成（含重试）
+        try:
+            meta = await download_task
+        except Exception as e:
+            logger.warning(f'第{i+1}/{n}项下载失败: {e}')
+            failed += 1
+            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+            # 预启动下一个
+            if i + 1 < n:
+                download_task = asyncio.create_task(_dl(entries[i + 1], i + 1))
+            await progress_cb(success, failed, i + 1, n)
+            if i + 1 < n:
+                await asyncio.sleep(random.uniform(1, 3))
+            continue
+
+        # 2. 预启动下一个下载（管道核心：下载与上传并行）
+        if i + 1 < n:
+            download_task = asyncio.create_task(_dl(entries[i + 1], i + 1))
+
+        # 3. 上传当前
+        meta['category'] = category
+        try:
+            result = await direct_upload(meta['file_path'], meta)
+            success += 1
+        except Exception as e:
+            logger.warning(f'第{i+1}/{n}项上传失败: {e}')
+            failed += 1
+            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+
+        # 4. 立即删除当前
+        try:
+            os.remove(meta['file_path'])
+        except Exception:
+            pass
+
+        await progress_cb(success, failed, i + 1, n)
+
+        if i + 1 < n:
+            await asyncio.sleep(random.uniform(1, 3))
+
+    return success, failed, failed_items
+
 
 async def _process_playlist_entries(query, info, entries, total, fmt, res):
     """处理播放列表条目，带重试逻辑和失败收集。返回 (success, failed, failed_items)。"""
