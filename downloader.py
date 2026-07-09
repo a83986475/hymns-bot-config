@@ -165,12 +165,19 @@ def get_playlist_info(url: str) -> dict:
     }
 
 
-def download_audio(url: str) -> dict:
-    os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
+def _output_dir(subdir: str = '') -> str:
+    """返回输出目录，子目录用于按频道/播放列表组织文件。"""
+    d = os.path.join(config.DOWNLOAD_DIR, subdir) if subdir else config.DOWNLOAD_DIR
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def download_audio(url: str, subdir: str = '') -> dict:
+    output_dir = _output_dir(subdir)
     ydl_opts = {
         **_base_opts(),
         'format': 'bestaudio/best',
-        'outtmpl': f'{config.DOWNLOAD_DIR}/%(id)s.%(ext)s',
+        'outtmpl': f'{output_dir}/%(id)s.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -179,7 +186,7 @@ def download_audio(url: str) -> dict:
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        file_path = f"{config.DOWNLOAD_DIR}/{info['id']}.mp3"
+        file_path = f"{output_dir}/{info['id']}.mp3"
         return {
             'file_path': file_path,
             'title': info.get('title', ''),
@@ -193,8 +200,8 @@ def download_audio(url: str) -> dict:
         }
 
 
-def download_video(url: str, format_id: str) -> dict:
-    os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
+def download_video(url: str, format_id: str, subdir: str = '') -> dict:
+    output_dir = _output_dir(subdir)
     # format_id 处理：支持预设值（''/''best''/''1080''/''720''）或具体 format_id
     if not format_id or format_id in ('best', ''):
         format_str = 'bestvideo+bestaudio/best'
@@ -209,12 +216,12 @@ def download_video(url: str, format_id: str) -> dict:
     ydl_opts = {
         **_base_opts(),
         'format': format_str,
-        'outtmpl': f'{config.DOWNLOAD_DIR}/%(id)s.%(ext)s',
+        'outtmpl': f'{output_dir}/%(id)s.%(ext)s',
         'merge_output_format': 'mp4',
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        file_path = f"{config.DOWNLOAD_DIR}/{info['id']}.mp4"
+        file_path = f"{output_dir}/{info['id']}.mp4"
         return {
             'file_path': file_path,
             'title': info.get('title', ''),

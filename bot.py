@@ -222,10 +222,45 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _discover_channel_playlists(url: str, loop) -> list:
+    """发现频道中的播放列表：访问 /playlists 标签页提取。"""
+    # 构造播放列表标签页 URL（去掉末尾 /videos 等）
+    import json as _json
+    import subprocess as _sp
+    base = re.sub(r'(/videos|/playlists|/streams)?/?$', '', url)
+    playlists_url = base + '/playlists'
+    logger.info(f'发现频道播放列表: {playlists_url}')
+
+    def _fetch():
+        r = _sp.run(
+            ['yt-dlp', '--no-warnings', '--flat-playlist', '--dump-single-json', '--ignore-errors', playlists_url],
+            capture_output=True, text=True, encoding='utf-8', errors='replace'
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return []
+        try:
+            obj = _json.loads(r.stdout)
+        except Exception:
+            return []
+        entries = obj.get('entries', [])
+        result = []
+        for e in entries:
+            title = e.get('title', '')
+            pid = e.get('id', '')
+            if title and pid:
+                result.append({
+                    'title': title,
+                    'id': pid,
+                    'url': f'https://www.youtube.com/playlist?list={pid}',
+                })
+        return result
+
+    return await loop.run_in_executor(None, _fetch)
+
+
 async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """下载整个 YouTube 频道并自动上传到 Telegram。
-    yt-dlp 的 get_playlist_info 可直接处理频道 URL（/@ /channel/UC...），
-    复用已有的 playlist 下载 + 上传流程。
+    发现播放列表并按 频道名/播放列表名 组织目录结构。
     """
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
@@ -246,32 +281,51 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not info['entries']:
         await msg.edit_text('❌ 频道为空或无法获取视频列表'); return
 
-    _cache_put(playlist_cache, uid, info)
+    # 尝试发现播放列表
+    playlists = await _discover_channel_playlists(url, loop)
+    channel_title = info['title']
+
+    _cache_put(playlist_cache, uid, {'info': info, 'playlists': playlists, 'channel_title': channel_title})
     total_dur = fmt_dur(info['total_duration'])
     total = info['count']
 
-    # 频道通常很大，提示确认后才开始
+    # 构建 UI
+    playlist_count = len(playlists)
+    lines = [f"📺 *{_esc_md(str(channel_title))}*"]
+    lines.append(f"🎵 共 {total} 个视频")
+    lines.append(f"⏱ 总时长：{total_dur}")
+    if playlist_count > 0:
+        lines.append(f"📂 发现 {playlist_count} 个播放列表")
+        # 显示前 10 个播放列表
+        for pl in playlists[:10]:
+            lines.append(f"   • {_esc_md(str(pl['title']))}")
+        if len(playlists) > 10:
+            lines.append(f'   … 还有 {len(playlists) - 10} 个')
+    lines.append(f"\n文件将按 频道名/播放列表名 组织。")
+
     buttons = [
-        [InlineKeyboardButton(f'✅ 下载全部音频 ({total} 个)', callback_data=f'ch:{uid}:audio:0')],
+        [InlineKeyboardButton(f'✅ 下载全部音频 ({total} 个)', callback_data=f'ch:{uid}:audio:all')],
     ]
     if total <= 50:
         buttons.append([InlineKeyboardButton(
             '🎬 最高画质视频', callback_data=f'ch:{uid}:video:best'
         )])
+    # 有播放列表时，加按播放列表下载按钮
+    if playlist_count > 0:
+        buttons.append([InlineKeyboardButton(
+            f'📂 按播放列表下载 ({playlist_count} 个)',
+            callback_data=f'chpl:{uid}:audio:all'
+        )])
 
     await msg.edit_text(
-        f"📺 *{_esc_md(str(info['title']))}*\n"
-        f"🎵 共 {total} 个视频\n"
-        f"⏱ 总时长：{total_dur}\n"
-        f"📂 分类：`油管上传`\n\n"
-        f"频道通常较大，确认后自动开始下载并上传到 Telegram。",
+        '\n'.join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode='Markdown'
     )
 
 
 async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """频道下载回调：复用播放列表的处理逻辑。"""
+    """频道下载回调：按播放列表组织目录结构。"""
     query = update.callback_query
     await query.answer()
     parts = query.data.split(':')
@@ -280,47 +334,140 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if uid not in playlist_cache:
         await query.edit_message_text('❌ 缓存已过期，请重新发送链接'); return
 
-    info = playlist_cache[uid]
+    cached = playlist_cache[uid]
+    info = cached['info']
+    playlists = cached.get('playlists', [])
+    channel_title = cached.get('channel_title', info.get('title', 'Unknown'))
+    channel_safe = re.sub(r'[<>:"/\\|?*]', '_', str(channel_title)).strip().rstrip(' .')
     entries = info['entries']
     total = len(entries)
+    loop = asyncio.get_event_loop()
 
+    # chpl: → 按播放列表组织
+    if query.data.startswith('chpl:'):
+        if not playlists:
+            await query.edit_message_text('❌ 未发现播放列表'); return
+        fmt_label = '音频 MP3' if fmt == 'audio' else '视频'
+        await query.edit_message_text(
+            f"📂 按播放列表下载：*{_esc_md(str(channel_title))}*\n"
+            f"共 {len(playlists)} 个播放列表\n"
+            f"格式：{fmt_label}\n"
+            f"正在逐一下载每个播放列表...",
+            parse_mode='Markdown'
+        )
+
+        total_success, total_failed = 0, 0
+        all_failed_items = []
+
+        for pl_idx, pl in enumerate(playlists, 1):
+            pl_safe = re.sub(r'[<>:"/\\|?*]', '_', str(pl['title'])).strip().rstrip(' .') or pl['id']
+            subdir = os.path.join(channel_safe, pl_safe)
+
+            await query.edit_message_text(
+                f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
+                f"✅ 已完成：{total_success} | ❌ 失败：{total_failed}",
+                parse_mode='Markdown'
+            )
+
+            try:
+                pl_info = await loop.run_in_executor(None, get_playlist_info, pl['url'])
+            except Exception as e:
+                logger.warning(f'获取播放列表失败 {pl["title"]}: {e}')
+                continue
+
+            if not pl_info.get('entries'):
+                continue
+
+            for i, entry in enumerate(pl_info['entries'], 1):
+                try:
+                    if fmt == 'audio':
+                        meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir)
+                    else:
+                        meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
+                    meta['category'] = '油管上传'
+
+                    result = await direct_upload(meta['file_path'], meta)
+                    try:
+                        os.remove(meta['file_path'])
+                    except Exception:
+                        pass
+                    total_success += 1
+
+                    # 每 5 项更新一次进度
+                    if i % 5 == 0 or i == len(pl_info['entries']):
+                        await query.edit_message_text(
+                            f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
+                            f"进度：{i}/{len(pl_info['entries'])} | "
+                            f"✅ {total_success} | ❌ {total_failed}",
+                            parse_mode='Markdown'
+                        )
+
+                    # 每项之间延迟
+                    await asyncio.sleep(random.uniform(1, 3))
+
+                except Exception as e:
+                    logger.warning(f'[{pl["title"]}] 第{i}项失败: {e}')
+                    total_failed += 1
+                    all_failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+
+        result_msg = f"{'✅' if total_failed == 0 else '⚠️'} *频道按播放列表下载完成*\n\n"
+        result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+        result_msg += f"✅ 成功：{total_success}\n"
+        if total_failed > 0:
+            result_msg += f"❌ 失败：{total_failed}"
+
+        await query.edit_message_text(result_msg, parse_mode='Markdown')
+        return
+
+    # ch: → 平铺下载（不按播放列表组织）
     fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
-        f"⬇️ 开始下载频道：*{_esc_md(str(info['title']))}*\n"
+        f"⬇️ 开始下载频道：*{_esc_md(str(channel_title))}*\n"
         f"共 {total} 个，格式：{fmt_label}\n"
-        f"进度：0/{total}",
+        f"进度：0/{total}\n"
+        f"📂 按频道名组织目录",
         parse_mode='Markdown'
     )
 
-    success, failed, failed_items = await _process_playlist_entries(
-        query, info, entries, total, fmt, res
-    )
+    success, failed = 0, 0
+    failed_items = []
+    for i, entry in enumerate(entries, 1):
+        if i > 1:
+            await asyncio.sleep(random.uniform(2, 5))
+
+        try:
+            await query.edit_message_text(
+                f"⬇️ 下载 {i}/{total} — {_esc_md(str(entry['title'][:40]))}",
+                parse_mode='Markdown'
+            )
+
+            subdir = channel_safe
+            if fmt == 'audio':
+                meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir)
+            elif res == 'best':
+                meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
+            else:
+                meta = await loop.run_in_executor(None, download_video, entry['url'], res, subdir)
+            meta['category'] = '油管上传'
+
+            result = await direct_upload(meta['file_path'], meta)
+            try:
+                os.remove(meta['file_path'])
+            except Exception:
+                pass
+            success += 1
+        except Exception as e:
+            logger.error(f'频道第{i}项失败: {e}')
+            failed += 1
+            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
 
     result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
-    result_msg += f"📺 {_esc_md(str(info['title']))}\n"
+    result_msg += f"📺 {_esc_md(str(channel_title))}\n"
     result_msg += f"✅ 成功：{success}\n"
     if failed > 0:
-        result_msg += f"❌ 失败：{failed}\n"
-        for item in failed_items[:5]:
-            result_msg += f"   • {_esc_md(str(item['title'][:40]))}\n"
-        if len(failed_items) > 5:
-            result_msg += f'   … 还有 {len(failed_items) - 5} 项\n'
+        result_msg += f"❌ 失败：{failed}"
 
-    buttons = []
-    if failed > 0:
-        if 'failed_items' not in playlist_cache:
-            _cache_put(playlist_cache, 'failed_items', {})
-        playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items}
-        buttons.append([InlineKeyboardButton(
-            f'🔄 重试失败项 ({failed})',
-            callback_data=f'rch:{uid}:{fmt}:{res}'
-        )])
-
-    await query.edit_message_text(
-        result_msg,
-        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
-        parse_mode='Markdown'
-    )
+    await query.edit_message_text(result_msg, parse_mode='Markdown')
 
 # ──────────────────格式选择──────────────────
 
@@ -1627,6 +1774,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_retry_playlist_failed, pattern=r'^rpl:'))
     app.add_handler(CallbackQueryHandler(callback_channel, pattern=r'^ch:'))
     app.add_handler(CallbackQueryHandler(callback_retry_playlist_failed, pattern=r'^rch:'))
+    app.add_handler(CallbackQueryHandler(callback_channel, pattern=r'^chpl:'))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
