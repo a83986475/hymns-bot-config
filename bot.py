@@ -119,10 +119,16 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🎵 *赞美诗资源机器人*\n\n"
         "*/search* `关键词` — 搜索并列出候选\n"
         "*/auto* `关键词` — 自动下载第一个（音频）\n"
-        "*/add* `URL` — 直接上传指定链接\n"
-        "*/playlist* `URL` — 下载整个播放列表\n"
-        "*/channel* `URL` — 下载整个频道（音频）\n"
+        "*/add* `URL` — 显示格式/音质选择按钮\n"
+        "*/playlist* `URL` [音质] — 下载播放列表\n"
+        "*/channel* `URL` [音质] — 下载整个频道\n"
         "*/category* `关键词` `分类` — 指定分类上传\n\n"
+        "*音质选项*（channel/playlist）：\n"
+        "`192k` — 原质 stereo（默认，不压缩）\n"
+        "`128k` — 高质量 stereo\n"
+        "`64k` — 中等 mono\n"
+        "`32k` — 低质 mono（最省流量）\n"
+        "省略音质参数时显示按钮供手动选择\n\n"
         "分类：`诗歌音频` `歌谱乐谱` `歌词文本` `教程资料` `油管上传`",
         parse_mode='Markdown'
     )
