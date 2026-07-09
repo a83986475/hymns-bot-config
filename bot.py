@@ -280,9 +280,9 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
         await update.effective_message.reply_text(
-            '用法：/channel https://youtube.com/@channelname [low|medium|high]\n'
-            '例：/channel https://www.youtube.com/@LigonierMinistries low\n'
-            '音质：low=32k, medium=64k, high=128k，省略则显示按钮手动选择'
+            '用法：/channel https://youtube.com/@channelname [32k|64k|128k]\n'
+            '例：/channel https://www.youtube.com/@LigonierMinistries 32k\n'
+            '音质：32k, 64k, 128k，省略则显示按钮手动选择'
         )
         return
     url = ctx.args[0]
@@ -294,15 +294,19 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # 裸频道名也补全（如 TheHopeTV → https://www.youtube.com/@TheHopeTV）
         url = 'https://www.youtube.com/@' + url
 
-    # 解析可选音质参数
+    # 解析可选音质参数（支持 bitrate 值 32k/64k/128k 或别名 low/medium/high）
+    _BITRATE_TO_KEY = {v[0]: k for k, v in AUDIO_QUALITY_PRESETS.items()}
     quality = ''
     if len(ctx.args) >= 2:
         q = ctx.args[1].lower()
         if q in AUDIO_QUALITY_PRESETS:
             quality = q
+        elif q in _BITRATE_TO_KEY:
+            quality = _BITRATE_TO_KEY[q]
         else:
+            valid = [v[0] for v in AUDIO_QUALITY_PRESETS.values()]
             await update.effective_message.reply_text(
-                f'❌ 无效音质："{q}"，可选：low, medium, high，省略则显示按钮手动选择'
+                f'❌ 无效音质："{q}"，可选：{" / ".join(valid)}，省略则显示按钮手动选择'
             )
             return
 
