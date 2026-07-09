@@ -231,17 +231,12 @@ def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
     """
     output_dir = _output_dir(subdir)
 
-    # 低音质预设 → 下载较小的音频流，减少下载量
+    # 一律下载 bestaudio 保证兼容性，低音质后续用 ffmpeg 压缩
     needs_compress = quality and quality != 'original'
-    if needs_compress and quality in AUDIO_QUALITY_PRESETS:
-        format_str = 'worstaudio/worst'
-    else:
-        format_str = 'bestaudio/best'
-        needs_compress = False
 
     ydl_opts = {
         **_base_opts(),
-        'format': format_str,
+        'format': 'bestaudio/best',
         'outtmpl': f'{output_dir}/%(id)s.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
