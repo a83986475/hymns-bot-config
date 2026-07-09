@@ -106,9 +106,9 @@ def _height_label(h: int) -> str:
 
 def fmt_id_to_quality(fmt_id: str) -> str:
     """将 callback data 中的 audio fmt_id 转为 quality 参数。
-    '0' 或 '' 表示默认（不压缩），其他值直接传。
+    '0', '' 或 'original' 表示 192k 原质（不压缩），其他值直接传。
     """
-    if fmt_id in ('0', '', 'all', 'audio'):
+    if fmt_id in ('0', '', 'all', 'audio', 'original'):
         return ''
     return fmt_id
 
@@ -215,7 +215,7 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f'🎵 全部音频 ({aq["low"][3]})', callback_data=f'pl:{uid}:audio:low')],
         [InlineKeyboardButton(f'🎵 全部音频 ({aq["medium"][3]})', callback_data=f'pl:{uid}:audio:medium')],
         [InlineKeyboardButton(f'🎵 全部音频 ({aq["high"][3]})', callback_data=f'pl:{uid}:audio:high')],
-        [InlineKeyboardButton('🎵 全部音频 (原质 192k)', callback_data=f'pl:{uid}:audio:0')],
+        [InlineKeyboardButton(f'🎵 全部音频 ({aq["original"][3]})', callback_data=f'pl:{uid}:audio:original')],
         [InlineKeyboardButton('🎬 最高画质视频', callback_data=f'pl:{uid}:video:best')],
     ]
     for h in sorted(SUPPORTED_HEIGHTS):
@@ -352,7 +352,7 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f'✅ 全部音频 ({aq["low"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:low')],
         [InlineKeyboardButton(f'✅ 全部音频 ({aq["medium"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:medium')],
         [InlineKeyboardButton(f'✅ 全部音频 ({aq["high"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:high')],
-        [InlineKeyboardButton(f'✅ 全部音频 (原质 192k) ({total} 个)', callback_data=f'ch:{uid}:audio:0')],
+        [InlineKeyboardButton(f'✅ 全部音频 ({aq["original"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:original')],
     ]
     if total <= 50:
         buttons.append([InlineKeyboardButton(
@@ -595,7 +595,7 @@ async def _show_format_picker(msg, url: str, uid: int):
         [InlineKeyboardButton(f'🎵 MP3 {audio_quality["low"][3]}', callback_data=f'fmt:{uid}:audio:low')],
         [InlineKeyboardButton(f'🎵 MP3 {audio_quality["medium"][3]}', callback_data=f'fmt:{uid}:audio:medium')],
         [InlineKeyboardButton(f'🎵 MP3 {audio_quality["high"][3]}', callback_data=f'fmt:{uid}:audio:high')],
-        [InlineKeyboardButton('🎵 MP3 原质 192k', callback_data=f'fmt:{uid}:audio:0')],
+        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["original"][3]}', callback_data=f'fmt:{uid}:audio:original')],
     ]
     for vf in info['video_formats']:
         buttons.append([InlineKeyboardButton(
@@ -631,7 +631,7 @@ async def callback_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f'🎵 MP3 {audio_quality["low"][3]}', callback_data=f'fmt:{uid}:audio:low')],
         [InlineKeyboardButton(f'🎵 MP3 {audio_quality["medium"][3]}', callback_data=f'fmt:{uid}:audio:medium')],
         [InlineKeyboardButton(f'🎵 MP3 {audio_quality["high"][3]}', callback_data=f'fmt:{uid}:audio:high')],
-        [InlineKeyboardButton('🎵 MP3 原质 192k', callback_data=f'fmt:{uid}:audio:0')],
+        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["original"][3]}', callback_data=f'fmt:{uid}:audio:original')],
     ]
     for vf in info['video_formats']:
         buttons.append([InlineKeyboardButton(

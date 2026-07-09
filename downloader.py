@@ -76,6 +76,7 @@ def _sha256_file(path: str) -> str:
 # ── 音频质量预设 ──
 # quality -> (bitrate, sample_rate, channels, label)
 AUDIO_QUALITY_PRESETS = {
+    'original': ('192k', '44100', '2', '192k stereo'),
     'low':    ('32k',  '22050', '1', '32k mono'),
     'medium': ('64k',  '44100', '1', '64k mono'),
     'high':   ('128k', '44100', '2', '128k stereo'),
@@ -223,15 +224,24 @@ def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
     Args:
         url: YouTube URL
         subdir: 子目录（用于频道/播放列表组织）
-        quality: 音质预设，''=默认192k, 'low'=32k, 'medium'=64k, 'high'=128k
+        quality: 音质预设，''/'original'=192k 原质, 'low'=32k, 'medium'=64k, 'high'=128k
 
     Returns:
         dict: 包含 file_path, title, artist, duration 等元数据
     """
     output_dir = _output_dir(subdir)
+
+    # 低音质预设 → 下载较小的音频流，减少下载量
+    needs_compress = quality and quality != 'original'
+    if needs_compress and quality in AUDIO_QUALITY_PRESETS:
+        format_str = 'worstaudio/worst'
+    else:
+        format_str = 'bestaudio/best'
+        needs_compress = False
+
     ydl_opts = {
         **_base_opts(),
-        'format': 'bestaudio/best',
+        'format': format_str,
         'outtmpl': f'{output_dir}/%(id)s.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -243,8 +253,8 @@ def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
         info = ydl.extract_info(url, download=True)
         file_path = f"{output_dir}/{info['id']}.mp3"
 
-    # 如果指定了质量预设，用 ffmpeg 压缩
-    if quality:
+    # 低音质预设 → ffmpeg 压缩到目标比特率
+    if needs_compress:
         file_path = _compress_audio(file_path, quality)
 
     return {
