@@ -993,42 +993,6 @@ async def _handle_search_http(request: aiohttp_web.Request):
         return aiohttp_web.json_response({'error': str(e)}, status=500)
 
 
-
-async def _handle_direct_url_http(request):
-    """yt-dlp -g 提取 Google CDN 直链"""
-    auth_ok = await _check_search_auth(request)
-    if not auth_ok:
-        return aiohttp_web.json_response({"error": "无权访问"}, status=401)
-
-    url = request.query.get('url', '')
-    format_id = request.query.get('format_id', 'bestaudio')
-
-    if not url:
-        return aiohttp_web.json_response({'error': '缺少 url 参数'}, status=400)
-
-    import subprocess
-    cmd = ['/usr/local/bin/yt-dlp', '-g', '--format', format_id, url]
-
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
-        ))
-        if result.returncode != 0:
-            error_msg = result.stderr.strip()[:200] or 'yt-dlp 提取直链失败'
-            return aiohttp_web.json_response({'error': error_msg}, status=502)
-
-        direct_url = result.stdout.strip().split('\n')[0]
-        if not direct_url:
-            return aiohttp_web.json_response({'error': '未获取到直链'}, status=502)
-
-        return aiohttp_web.json_response({'direct_url': direct_url})
-    except subprocess.TimeoutExpired:
-        return aiohttp_web.json_response({'error': '提取直链超时'}, status=504)
-    except Exception as e:
-        return aiohttp_web.json_response({'error': str(e)[:200]}, status=500)
-
-
 async def _handle_formats_http(request: aiohttp_web.Request):
     """返回 YouTube 视频的可用格式列表（含分辨率）。"""
     if not await _check_search_auth(request):
@@ -1460,7 +1424,6 @@ async def _start_search_server():
         app.router.add_get('/search', _handle_search_http)
         app.router.add_get('/download', _handle_download_http)
         app.router.add_get('/download-file', _handle_download_file_http)
-        app.router.add_get('/direct-url', _handle_direct_url_http)
         app.router.add_get('/formats', _handle_formats_http)
         runner = aiohttp_web.AppRunner(app)
         await runner.setup()
@@ -1495,7 +1458,7 @@ async def _cleanup_temp_dir():
                 if not os.path.isfile(fpath):
                     continue
                 age = now - os.path.getmtime(fpath)
-                # .part 或 .ytdl 等临时后缀 → 超过 10 分钟即删除
+                # .part 或 .ytdl 等临时后缀 → 超过 30 分钟即删除（跳过正在传输的）
                 if fname.endswith(('.part', '.ytdl', '.fragment', '.temp')) and age > 1800 and fpath not in _active_streams:
                     os.remove(fpath)
                     cleaned += 1
