@@ -273,12 +273,16 @@ async def _discover_channel_playlists(url: str, loop) -> list:
 async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """下载整个 YouTube 频道并自动上传到 Telegram。
     发现播放列表并按 频道名/播放列表名 组织目录结构。
+
+    用法：/channel <URL> [low|medium|high]
+    省略音质参数时显示按钮供手动选择，默认原质 192k。
     """
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
         await update.effective_message.reply_text(
-            '用法：/channel https://youtube.com/@channelname\n'
-            '例：/channel https://www.youtube.com/@LigonierMinistries'
+            '用法：/channel https://youtube.com/@channelname [low|medium|high]\n'
+            '例：/channel https://www.youtube.com/@LigonierMinistries low\n'
+            '音质：low=32k, medium=64k, high=128k，省略则显示按钮手动选择'
         )
         return
     url = ctx.args[0]
@@ -289,6 +293,19 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif not url.startswith('http'):
         # 裸频道名也补全（如 TheHopeTV → https://www.youtube.com/@TheHopeTV）
         url = 'https://www.youtube.com/@' + url
+
+    # 解析可选音质参数
+    quality = ''
+    if len(ctx.args) >= 2:
+        q = ctx.args[1].lower()
+        if q in AUDIO_QUALITY_PRESETS:
+            quality = q
+        else:
+            await update.effective_message.reply_text(
+                f'❌ 无效音质："{q}"，可选：low, medium, high，省略则显示按钮手动选择'
+            )
+            return
+
     uid = update.effective_user.id
     msg = await update.effective_message.reply_text('🔍 正在解析频道...')
     loop = asyncio.get_event_loop()
@@ -305,10 +322,14 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     channel_title = info['title']
 
     _cache_put(playlist_cache, uid, {'info': info, 'playlists': playlists, 'channel_title': channel_title})
+
+    # ── 命令行指定音质 → 跳过按钮，直接下载 ──
+    if quality:
+        return await _download_channel_direct(msg, uid, channel_title, info['entries'], quality)
+
+    # ── 无音质参数 → 显示按钮 UI ──
     total_dur = fmt_dur(info['total_duration'])
     total = info['count']
-
-    # 构建 UI
     playlist_count = len(playlists)
     lines = [f"📺 *{_esc_md(str(channel_title))}*"]
     lines.append(f"🎵 共 {total} 个视频")
@@ -345,6 +366,67 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode='Markdown'
     )
+
+
+async def _download_channel_direct(msg, uid: int, channel_title: str, entries: list, quality: str):
+    """直接下载频道（跳过按钮选择），用于命令行指定音质参数时。"""
+    total = len(entries)
+    channel_safe = re.sub(r'[<>:"/\\|?*]', '_', str(channel_title)).strip().rstrip(' .')
+    loop = asyncio.get_event_loop()
+
+    aq = AUDIO_QUALITY_PRESETS
+    quality_label = aq[quality][3] if quality in aq else '原质 192k'
+
+    await msg.edit_text(
+        f"⬇️ 开始下载频道：*{_esc_md(str(channel_title))}*\n"
+        f"共 {total} 个，音质：{quality_label}\n"
+        f"进度：0/{total}\n"
+        f"📂 按频道名组织目录",
+        parse_mode='Markdown'
+    )
+
+    success, failed = 0, 0
+    failed_items = []
+    for i, entry in enumerate(entries, 1):
+        if i > 1:
+            await asyncio.sleep(random.uniform(2, 5))
+
+        try:
+            await msg.edit_text(
+                f"⬇️ 下载 {i}/{total} — {_esc_md(str(entry['title'][:40]))}",
+                parse_mode='Markdown'
+            )
+
+            meta = await loop.run_in_executor(None, download_audio, entry['url'], channel_safe, quality)
+            meta['category'] = '油管上传'
+
+            result = await direct_upload(meta['file_path'], meta)
+            try:
+                os.remove(meta['file_path'])
+            except Exception:
+                pass
+            success += 1
+        except Exception as e:
+            logger.error(f'频道第{i}项失败: {e}')
+            failed += 1
+            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+
+        # 每 5 项更新一次进度
+        if i % 5 == 0 or i == total:
+            await msg.edit_text(
+                f"⬇️ 下载频道中：{_esc_md(str(channel_title))}\n"
+                f"进度：{i}/{total} | ✅ {success} | ❌ {failed}\n"
+                f"音质：{quality_label}",
+                parse_mode='Markdown'
+            )
+
+    result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
+    result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+    result_msg += f"✅ 成功：{success}\n"
+    if failed > 0:
+        result_msg += f"❌ 失败：{failed}"
+
+    await msg.edit_text(result_msg, parse_mode='Markdown')
 
 
 async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
