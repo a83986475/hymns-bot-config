@@ -114,7 +114,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*/add* `URL` — 直接上传指定链接\n"
         "*/playlist* `URL` — 下载整个播放列表\n"
         "*/channel* `URL` — 下载整个频道（音频）\n"
-        "*/category* `关键词` `分类` — 指定分类上传\n\n",
+        "*/category* `关键词` `分类` — 指定分类上传\n\n"
         "分类：`诗歌音频` `歌谱乐谱` `歌词文本` `教程资料` `油管上传`",
         parse_mode='Markdown'
     )
