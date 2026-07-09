@@ -122,7 +122,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*/add* `URL` — 显示格式/音质选择按钮\n"
         "*/playlist* `URL` [音质] — 下载播放列表\n"
         "*/channel* `URL` [音质] — 下载整个频道\n"
-        "*/category* `关键词` `分类` — 指定分类上传\n\n"
+        "*/category* `关键词` `分类` — 搜索并自动按分类上传（跳过选择）\n\n"
         "*音质选项*（channel/playlist）：\n"
         "`192k` — 原质 stereo（默认，不压缩）\n"
         "`128k` — 高质量 stereo\n"
