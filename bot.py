@@ -270,6 +270,13 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
     url = ctx.args[0]
+    # @ 简写补全
+    url = url.strip()
+    if url.startswith('@'):
+        url = 'https://www.youtube.com/' + url
+    elif not url.startswith('http'):
+        # 裸频道名也补全（如 TheHopeTV → https://www.youtube.com/@TheHopeTV）
+        url = 'https://www.youtube.com/@' + url
     uid = update.effective_user.id
     msg = await update.effective_message.reply_text('🔍 正在解析频道...')
     loop = asyncio.get_event_loop()
