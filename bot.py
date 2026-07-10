@@ -70,6 +70,9 @@ def _mark_yt_rate_limit(url: str):
             for k in expired:
                 del _yt_rate_limit_cache[k]
 
+# 用户取消频道/播放列表下载的请求（set of user_id）
+_channel_cancel_reqs: set[int] = set()
+
 # 追踪当前正在通过 HTTP 流式传输的文件（磁盘满时紧急清理用）
 _active_streams: set = set()
 
@@ -115,7 +118,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*/add* `URL` — 直接上传指定链接（可选音质）\n"
         "*/playlist* `URL` — 下载整个播放列表\n"
         "*/channel* `URL` — 下载整个频道（音频）\n"
-        "*/category* `关键词` `分类` — 指定分类上传\n\n"
+        "*/category* `关键词` `分类` — 指定分类上传\n"
+        "*/cancel* — 取消正在进行的频道/播放列表下载\n\n"
         f"*音质选项*：\n"
         f"`{aq['low'][0]}` — {aq['low'][3]}（最省流量）\n"
         f"`{aq['medium'][0]}` — {aq['medium'][3]}\n"
@@ -189,6 +193,20 @@ async def cmd_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _do_download_and_upload(msg, results[0]['url'], {'category': category}, 'audio', None)
     except Exception as e:
         await msg.edit_text(f'❌ 失败：{e}')
+
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """取消正在进行的频道/播放列表下载。"""
+    if not is_admin(update.effective_user.id): return
+    uid = update.effective_user.id
+    if uid in _channel_cancel_reqs:
+        await update.effective_message.reply_text('⏳ 已有取消请求在处理中...')
+        return
+    _channel_cancel_reqs.add(uid)
+    await update.effective_message.reply_text(
+        '🛑 取消请求已发送，将在当前项处理完成后停止...\n'
+        '（如果当前正在上传中，请稍等片刻）'
+    )
 
 async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -392,64 +410,93 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         total_success, total_failed = 0, 0
         all_failed_items = []
+        cancelled = False
 
-        for pl_idx, pl in enumerate(playlists, 1):
-            pl_safe = re.sub(r'[<>:"/\\|?*]', '_', str(pl['title'])).strip().rstrip(' .') or pl['id']
-            subdir = os.path.join(channel_safe, pl_safe)
+        try:
+            for pl_idx, pl in enumerate(playlists, 1):
+                if cancelled:
+                    break
 
-            await query.edit_message_text(
-                f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
-                f"✅ 已完成：{total_success} | ❌ 失败：{total_failed}",
-                parse_mode='Markdown'
-            )
+                pl_safe = re.sub(r'[<>:"/\\|?*]', '_', str(pl['title'])).strip().rstrip(' .') or pl['id']
+                subdir = os.path.join(channel_safe, pl_safe)
 
-            try:
-                pl_info = await loop.run_in_executor(None, get_playlist_info, pl['url'])
-            except Exception as e:
-                logger.warning(f'获取播放列表失败 {pl["title"]}: {e}')
-                continue
+                await query.edit_message_text(
+                    f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
+                    f"✅ 已完成：{total_success} | ❌ 失败：{total_failed}",
+                    parse_mode='Markdown'
+                )
 
-            if not pl_info.get('entries'):
-                continue
-
-            for i, entry in enumerate(pl_info['entries'], 1):
                 try:
-                    if fmt == 'audio':
-                        quality = res if res != '0' else ''
-                        meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality)
-                    else:
-                        meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
-                    meta['category'] = '油管上传'
+                    pl_info = await loop.run_in_executor(None, get_playlist_info, pl['url'])
+                except Exception as e:
+                    logger.warning(f'获取播放列表失败 {pl["title"]}: {e}')
+                    continue
 
-                    result = await direct_upload(meta['file_path'], meta)
+                if not pl_info.get('entries'):
+                    continue
+
+                for i, entry in enumerate(pl_info['entries'], 1):
+                    # 检查取消请求
+                    if query.from_user.id in _channel_cancel_reqs:
+                        logger.info(f'用户 {query.from_user.id} 取消频道下载（播放列表 {pl["title"]}）')
+                        cancelled = True
+                        break
+
                     try:
-                        os.remove(meta['file_path'])
-                    except Exception:
-                        pass
-                    total_success += 1
+                        if fmt == 'audio':
+                            quality = res if res != '0' else ''
+                            meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality)
+                        else:
+                            meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
+                        meta['category'] = '油管上传'
 
-                    # 每 5 项更新一次进度
-                    if i % 5 == 0 or i == len(pl_info['entries']):
+                        result = await direct_upload(meta['file_path'], meta)
+                        try:
+                            os.remove(meta['file_path'])
+                        except Exception:
+                            pass
+                        total_success += 1
+
+                        # 每 5 项更新一次进度
+                        if i % 5 == 0 or i == len(pl_info['entries']):
+                            await query.edit_message_text(
+                                f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
+                                f"进度：{i}/{len(pl_info['entries'])} | "
+                                f"✅ {total_success} | ❌ {total_failed}",
+                                parse_mode='Markdown'
+                            )
+
+                        # 每项之间延迟
+                        await asyncio.sleep(random.uniform(1, 3))
+
+                    except Exception as e:
+                        err_msg = str(e)[:100]
+                        logger.warning(f'[{pl["title"]}] 第{i}项失败: {e}')
+                        total_failed += 1
+                        all_failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+                        # 失败时也更新进度，显示错误原因
                         await query.edit_message_text(
                             f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
-                            f"进度：{i}/{len(pl_info['entries'])} | "
+                            f"❌ 第{i}项失败: {_esc_md(err_msg)}\n"
                             f"✅ {total_success} | ❌ {total_failed}",
                             parse_mode='Markdown'
                         )
+        finally:
+            # 清除取消标志（确保无论异常还是取消都执行）
+            _channel_cancel_reqs.discard(query.from_user.id)
 
-                    # 每项之间延迟
-                    await asyncio.sleep(random.uniform(1, 3))
-
-                except Exception as e:
-                    logger.warning(f'[{pl["title"]}] 第{i}项失败: {e}')
-                    total_failed += 1
-                    all_failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
-
-        result_msg = f"{'✅' if total_failed == 0 else '⚠️'} *频道按播放列表下载完成*\n\n"
-        result_msg += f"📺 {_esc_md(str(channel_title))}\n"
-        result_msg += f"✅ 成功：{total_success}\n"
-        if total_failed > 0:
-            result_msg += f"❌ 失败：{total_failed}"
+        if cancelled:
+            result_msg = f'🛑 *频道下载已取消*\n\n'
+            result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+            result_msg += f"✅ 已完成：{total_success}\n"
+            result_msg += f"❌ 失败：{total_failed}\n"
+            result_msg += f"⚡ 已处理 {total_success + total_failed} 项"
+        else:
+            result_msg = f"{'✅' if total_failed == 0 else '⚠️'} *频道按播放列表下载完成*\n\n"
+            result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+            result_msg += f"✅ 成功：{total_success}\n"
+            if total_failed > 0:
+                result_msg += f"❌ 失败：{total_failed}"
 
         await query.edit_message_text(result_msg, parse_mode='Markdown')
         return
@@ -468,9 +515,16 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     success, failed = 0, 0
     failed_items = []
+    cancelled = False
     for i, entry in enumerate(entries, 1):
         if i > 1:
             await asyncio.sleep(random.uniform(2, 5))
+
+        # 检查取消请求
+        if query.from_user.id in _channel_cancel_reqs:
+            logger.info(f'用户 {query.from_user.id} 取消频道下载（ch: 路径）')
+            cancelled = True
+            break
 
         try:
             await query.edit_message_text(
@@ -495,15 +549,31 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             success += 1
         except Exception as e:
+            err_msg = str(e)[:100]
             logger.error(f'频道第{i}项失败: {e}')
             failed += 1
             failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+            await query.edit_message_text(
+                f"⬇️ {i}/{total} — {_esc_md(str(entry['title'][:35]))}\n"
+                f"❌ 失败: {_esc_md(err_msg)}",
+                parse_mode='Markdown'
+            )
 
-    result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
-    result_msg += f"📺 {_esc_md(str(channel_title))}\n"
-    result_msg += f"✅ 成功：{success}\n"
-    if failed > 0:
-        result_msg += f"❌ 失败：{failed}"
+    # 清除取消标志
+    _channel_cancel_reqs.discard(query.from_user.id)
+
+    if cancelled:
+        result_msg = f'🛑 *频道下载已取消*\n\n'
+        result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+        result_msg += f"✅ 已完成：{success}\n"
+        result_msg += f"❌ 失败：{failed}\n"
+        result_msg += f"⚡ 已处理 {success + failed} 项"
+    else:
+        result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
+        result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+        result_msg += f"✅ 成功：{success}\n"
+        if failed > 0:
+            result_msg += f"❌ 失败：{failed}"
 
     await query.edit_message_text(result_msg, parse_mode='Markdown')
 
@@ -1926,6 +1996,7 @@ async def post_init(app):
         BotCommand('auto',     '自动下载第一个结果（音频）'),
         BotCommand('add',      '直接上传指定链接'),
         BotCommand('playlist', '下载整个播放列表'),
+        BotCommand('cancel',  '取消正在进行的下载'),
         BotCommand('channel', '下载整个频道（音频）'),
         BotCommand('category', '指定分类上传'),
     ])
@@ -1949,6 +2020,7 @@ def main():
     app.add_handler(CommandHandler('category', cmd_category))
     app.add_handler(CommandHandler('playlist', cmd_playlist))
     app.add_handler(CommandHandler('channel', cmd_channel))
+    app.add_handler(CommandHandler('cancel',  cmd_cancel))
     app.add_handler(CallbackQueryHandler(callback_pick,     pattern=r'^pick:'))
     app.add_handler(CallbackQueryHandler(callback_format,   pattern=r'^fmt:'))
     app.add_handler(CallbackQueryHandler(callback_playlist, pattern=r'^pl:'))
