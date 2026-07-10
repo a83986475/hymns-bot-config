@@ -332,11 +332,23 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         buttons.append([InlineKeyboardButton(
             '🎬 最高画质视频', callback_data=f'ch:{uid}:video:best'
         )])
-    # 有播放列表时，加按播放列表下载按钮
+    # 有播放列表时，加按播放列表下载按钮（4 个音质选项）
     if playlist_count > 0:
         buttons.append([InlineKeyboardButton(
-            f'📂 按播放列表下载 ({playlist_count} 个)',
+            f'📂 按播放列表 ({aq["low"][3]}) ({playlist_count} 个)',
             callback_data=f'chpl:{uid}:audio:low'
+        )])
+        buttons.append([InlineKeyboardButton(
+            f'📂 按播放列表 ({aq["medium"][3]}) ({playlist_count} 个)',
+            callback_data=f'chpl:{uid}:audio:medium'
+        )])
+        buttons.append([InlineKeyboardButton(
+            f'📂 按播放列表 ({aq["high"][3]}) ({playlist_count} 个)',
+            callback_data=f'chpl:{uid}:audio:high'
+        )])
+        buttons.append([InlineKeyboardButton(
+            f'📂 按播放列表 (原质 192k) ({playlist_count} 个)',
+            callback_data=f'chpl:{uid}:audio:0'
         )])
 
     await msg.edit_text(
