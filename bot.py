@@ -73,6 +73,9 @@ def _mark_yt_rate_limit(url: str):
 # 用户取消频道/播放列表下载的请求（set of user_id）
 _channel_cancel_reqs: set[int] = set()
 
+# 频道目录 ID 缓存（避免重复 API 调用）
+_channel_folder_id_cache: dict[str, int] = {}  # channel_title -> folder_id
+
 # 追踪当前正在通过 HTTP 流式传输的文件（磁盘满时紧急清理用）
 _active_streams: set = set()
 
@@ -199,14 +202,20 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """取消正在进行的频道/播放列表下载。"""
     if not is_admin(update.effective_user.id): return
     uid = update.effective_user.id
-    if uid in _channel_cancel_reqs:
-        await update.effective_message.reply_text('⏳ 已有取消请求在处理中...')
-        return
-    _channel_cancel_reqs.add(uid)
-    await update.effective_message.reply_text(
-        '🛑 取消请求已发送，将在当前项处理完成后停止...\n'
-        '（如果当前正在上传中，请稍等片刻）'
-    )
+    already = uid in _channel_cancel_reqs
+    _channel_cancel_reqs.add(uid)  # 先标记再回复（即使回复失败，取消效果仍在）
+    logger.info(f'用户 {uid} 发送取消请求（already={already}）')
+    try:
+        if already:
+            await update.effective_message.reply_text('⏳ 已有取消请求在处理中...')
+        else:
+            await update.effective_message.reply_text(
+                '🛑 取消请求已发送，将在当前项处理完成后停止...\n'
+                '（如果当前正在上传中，请稍等片刻）'
+            )
+    except Exception as e:
+        logger.warning(f'取消回复失败（可能是频率限制）: {e}')
+        # 即使回复失败，取消标志已设置，不影响实际取消
 
 async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -435,6 +444,20 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 if not pl_info.get('entries'):
                     continue
 
+                # 获取/创建网站目录结构（频道名 → 播放列表名）
+                channel_folder_id = _channel_folder_id_cache.get(channel_title)
+                playlist_folder_id = None
+                if not channel_folder_id:
+                    channel_folder_id = await _ensure_folder(channel_title)
+                    if channel_folder_id:
+                        # 缓存频道目录 ID，限制缓存大小防止内存泄漏
+                        _channel_folder_id_cache[channel_title] = channel_folder_id
+                        if len(_channel_folder_id_cache) > 100:
+                            # 保留当前条目，只淘汰最旧的
+                            _channel_folder_id_cache = {channel_title: channel_folder_id}
+                if channel_folder_id:
+                    playlist_folder_id = await _ensure_folder(pl['title'], parent_id=channel_folder_id)
+
                 for i, entry in enumerate(pl_info['entries'], 1):
                     # 检查取消请求
                     if query.from_user.id in _channel_cancel_reqs:
@@ -449,6 +472,8 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         else:
                             meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
                         meta['category'] = '油管上传'
+                        if playlist_folder_id:
+                            meta['folder_id'] = playlist_folder_id
 
                         result = await direct_upload(meta['file_path'], meta)
                         try:
@@ -964,6 +989,51 @@ async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAU
         reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
         parse_mode='Markdown'
     )
+
+# ── 目录管理（获取/创建网站目录）──
+
+async def _ensure_folder(name: str, parent_id: int = None) -> int | None:
+    """获取或创建网站目录，返回 folder_id。失败返回 None。"""
+    headers = {'X-Admin-Token': config.CF_API_KEY, 'Content-Type': 'application/json'}
+    if not config.CF_WORKER_URL:
+        return None
+    try:
+        # 1. 查找已存在的目录
+        async with aiohttp.ClientSession() as session:
+            params = {}
+            if parent_id is not None:
+                params['parent_id'] = str(parent_id)
+            async with session.get(
+                f"{config.CF_WORKER_URL}/api/admin/folders",
+                headers=headers, params=params,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    folders = await resp.json()
+                    if isinstance(folders, list):
+                        for f in folders:
+                            if f.get('name') == name and f.get('parent_id') == parent_id:
+                                return f['id']
+
+        # 2. 不存在 → 创建
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{config.CF_WORKER_URL}/api/admin/folders",
+                headers=headers,
+                json={"name": name, "parent_id": parent_id, "sort_order": 0},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('id')
+                # 409 = 同级已存在同名目录，可能由并发创建导致
+                if resp.status == 409:
+                    data = await resp.json()
+                    return data.get('duplicate_id')
+    except Exception as e:
+        logger.warning(f'目录操作失败 ({name}): {e}')
+    return None
+
 
 # ──────────────────核心逻辑──────────────────
 
