@@ -28,10 +28,10 @@ async def refresh_jwt() -> str:
 
 
 def _admin_headers() -> dict:
-    return {
-        "X-Admin-Token":  config.CF_API_KEY,
-        "Authorization":  f"Bearer {config.CF_JWT}",
-    }
+    headers = {"X-Admin-Token": config.CF_API_KEY}
+    if config.CF_JWT:
+        headers["Authorization"] = f"Bearer {config.CF_JWT}"
+    return headers
 
 
 async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict | None:
