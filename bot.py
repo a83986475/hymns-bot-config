@@ -2018,13 +2018,28 @@ async def _start_search_server():
 # ──────────────────启动──────────────────
 
 async def _auto_refresh_jwt():
+    """定时刷新 JWT。失败时先 1s/2s/4s 快速重试 3 次，之后每 5 分钟重试一次。"""
+    startup_retries = [1, 2, 4]  # 启动时快速重试间隔（秒）
+    attempt = 0
     while True:
         try:
             jwt = await refresh_jwt()
-            logger.info('✅ JWT 已刷新' if jwt else '⚠️ JWT 刷新失败')
+            if jwt:
+                logger.info('✅ JWT 已刷新')
+                attempt = 0
+                await asyncio.sleep(23 * 3600)
+                continue
         except Exception as e:
-            logger.error(f'JWT 刷新异常：{e}')
-        await asyncio.sleep(23 * 3600)
+            logger.warning(f'⚠️ JWT 刷新异常 [{type(e).__name__}]: {e}')
+        # 失败：按尝试次数决定等待时长
+        if attempt < len(startup_retries):
+            delay = startup_retries[attempt]
+            attempt += 1
+            logger.info(f'⏳ JWT 刷新失败，{delay}s 后快速重试（第 {attempt}/3 次）')
+        else:
+            delay = 300  # 5 分钟
+            logger.info(f'⏳ JWT 刷新失败，{delay}s 后重试')
+        await asyncio.sleep(delay)
 
 async def _cleanup_temp_dir():
     """定时清理下载中断残留的临时文件。"""
