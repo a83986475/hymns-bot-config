@@ -499,13 +499,18 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         logger.warning(f'[{pl["title"]}] 第{i}项失败: {e}')
                         total_failed += 1
                         all_failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
-                        # 失败时也更新进度，显示错误原因
-                        await query.edit_message_text(
-                            f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
-                            f"❌ 第{i}项失败: {_esc_md(err_msg)}\n"
-                            f"✅ {total_success} | ❌ {total_failed}",
-                            parse_mode='Markdown'
-                        )
+                        # 失败时每 5 项更新一次进度消息（避免高频编辑压垮代理）
+                        # 首次失败立即显示错误原因，后续每 5 项汇总一次
+                        if total_failed == 1 or total_failed % 5 == 0 or i == len(pl_info['entries']):
+                            try:
+                                await query.edit_message_text(
+                                    f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
+                                    f"❌ 已失败 {total_failed} 项，最新: {_esc_md(err_msg)}\n"
+                                    f"✅ {total_success} | ❌ {total_failed}",
+                                    parse_mode='Markdown'
+                                )
+                            except Exception:
+                                pass  # 编辑失败不级联异常
         finally:
             # 清除取消标志（确保无论异常还是取消都执行）
             _channel_cancel_reqs.discard(query.from_user.id)
@@ -579,11 +584,17 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 logger.error(f'频道第{i}项失败: {e}')
                 failed += 1
                 failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
-                await query.edit_message_text(
-                    f"⬇️ {i}/{total} — {_esc_md(str(entry['title'][:35]))}\n"
-                    f"❌ 失败: {_esc_md(err_msg)}",
-                    parse_mode='Markdown'
-                )
+                # 失败时每 5 项更新一次进度（避免高频编辑压垮本地代理）
+                # 首次失败立即显示，后续每 5 项汇总
+                if failed == 1 or failed % 5 == 0:
+                    try:
+                        await query.edit_message_text(
+                            f"⬇️ {i}/{total} — {_esc_md(str(entry['title'][:35]))}\n"
+                            f"❌ 已失败 {failed} 项",
+                            parse_mode='Markdown'
+                        )
+                    except Exception:
+                        pass
     finally:
         # 清除取消标志（确保无论异常还是取消都执行）
         _channel_cancel_reqs.discard(query.from_user.id)
