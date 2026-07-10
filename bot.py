@@ -104,31 +104,24 @@ def fmt_dur(seconds) -> str:
 def _height_label(h: int) -> str:
     return HEIGHT_LABELS.get(h, f'{h}p')
 
-def fmt_id_to_quality(fmt_id: str) -> str:
-    """将 callback data 中的 audio fmt_id 转为 quality 参数。
-    '0', '' 或 'original' 表示 192k 原质（不压缩），其他值直接传。
-    """
-    if fmt_id in ('0', '', 'all', 'audio', 'original'):
-        return ''
-    return fmt_id
-
 # ──────────────────命令──────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    aq = AUDIO_QUALITY_PRESETS
     await update.effective_message.reply_text(
         "🎵 *赞美诗资源机器人*\n\n"
         "*/search* `关键词` — 搜索并列出候选\n"
         "*/auto* `关键词` — 自动下载第一个（音频）\n"
-        "*/add* `URL` — 显示格式/音质选择按钮\n"
-        "*/playlist* `URL` [音质] — 下载播放列表\n"
-        "*/channel* `URL` [音质] — 下载整个频道\n"
-        "*/category* `关键词` `分类` — 搜索并自动按分类上传（跳过选择）\n\n"
-        "*音质选项*（channel/playlist）：\n"
+        "*/add* `URL` — 直接上传指定链接（可选音质）\n"
+        "*/playlist* `URL` — 下载整个播放列表\n"
+        "*/channel* `URL` — 下载整个频道（音频）\n"
+        "*/category* `关键词` `分类` — 指定分类上传\n\n"
+        f"*音质选项*：\n"
+        f"`{aq['low'][0]}` — {aq['low'][3]}（最省流量）\n"
+        f"`{aq['medium'][0]}` — {aq['medium'][3]}\n"
+        f"`{aq['high'][0]}` — {aq['high'][3]}\n"
         "`192k` — 原质 stereo（默认，不压缩）\n"
-        "`128k` — 高质量 stereo\n"
-        "`64k` — 中等 mono\n"
-        "`32k` — 低质 mono（最省流量）\n"
-        "省略音质参数时显示按钮供手动选择\n\n"
+        "省略音质时使用原质 192k\n\n"
         "分类：`诗歌音频` `歌谱乐谱` `歌词文本` `教程资料` `油管上传`",
         parse_mode='Markdown'
     )
@@ -221,7 +214,7 @@ async def cmd_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f'🎵 全部音频 ({aq["low"][3]})', callback_data=f'pl:{uid}:audio:low')],
         [InlineKeyboardButton(f'🎵 全部音频 ({aq["medium"][3]})', callback_data=f'pl:{uid}:audio:medium')],
         [InlineKeyboardButton(f'🎵 全部音频 ({aq["high"][3]})', callback_data=f'pl:{uid}:audio:high')],
-        [InlineKeyboardButton(f'🎵 全部音频 ({aq["original"][3]})', callback_data=f'pl:{uid}:audio:original')],
+        [InlineKeyboardButton('🎵 全部音频 (原质 192k)', callback_data=f'pl:{uid}:audio:0')],
         [InlineKeyboardButton('🎬 最高画质视频', callback_data=f'pl:{uid}:video:best')],
     ]
     for h in sorted(SUPPORTED_HEIGHTS):
@@ -279,16 +272,12 @@ async def _discover_channel_playlists(url: str, loop) -> list:
 async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """下载整个 YouTube 频道并自动上传到 Telegram。
     发现播放列表并按 频道名/播放列表名 组织目录结构。
-
-    用法：/channel <URL> [low|medium|high]
-    省略音质参数时显示按钮供手动选择，默认原质 192k。
     """
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
         await update.effective_message.reply_text(
-            '用法：/channel https://youtube.com/@channelname [32k|64k|128k]\n'
-            '例：/channel https://www.youtube.com/@LigonierMinistries 32k\n'
-            '音质：32k, 64k, 128k，省略则显示按钮手动选择'
+            '用法：/channel https://youtube.com/@channelname\n'
+            '例：/channel https://www.youtube.com/@LigonierMinistries'
         )
         return
     url = ctx.args[0]
@@ -299,23 +288,6 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif not url.startswith('http'):
         # 裸频道名也补全（如 TheHopeTV → https://www.youtube.com/@TheHopeTV）
         url = 'https://www.youtube.com/@' + url
-
-    # 解析可选音质参数（支持 bitrate 值 32k/64k/128k 或别名 low/medium/high）
-    _BITRATE_TO_KEY = {v[0]: k for k, v in AUDIO_QUALITY_PRESETS.items()}
-    quality = ''
-    if len(ctx.args) >= 2:
-        q = ctx.args[1].lower()
-        if q in AUDIO_QUALITY_PRESETS:
-            quality = q
-        elif q in _BITRATE_TO_KEY:
-            quality = _BITRATE_TO_KEY[q]
-        else:
-            valid = [v[0] for v in AUDIO_QUALITY_PRESETS.values()]
-            await update.effective_message.reply_text(
-                f'❌ 无效音质："{q}"，可选：{" / ".join(valid)}，省略则显示按钮手动选择'
-            )
-            return
-
     uid = update.effective_user.id
     msg = await update.effective_message.reply_text('🔍 正在解析频道...')
     loop = asyncio.get_event_loop()
@@ -332,14 +304,10 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     channel_title = info['title']
 
     _cache_put(playlist_cache, uid, {'info': info, 'playlists': playlists, 'channel_title': channel_title})
-
-    # ── 命令行指定音质 → 跳过按钮，直接下载 ──
-    if quality:
-        return await _download_channel_direct(msg, uid, channel_title, info['entries'], quality)
-
-    # ── 无音质参数 → 显示按钮 UI ──
     total_dur = fmt_dur(info['total_duration'])
     total = info['count']
+
+    # 构建 UI
     playlist_count = len(playlists)
     lines = [f"📺 *{_esc_md(str(channel_title))}*"]
     lines.append(f"🎵 共 {total} 个视频")
@@ -358,7 +326,7 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f'✅ 全部音频 ({aq["low"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:low')],
         [InlineKeyboardButton(f'✅ 全部音频 ({aq["medium"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:medium')],
         [InlineKeyboardButton(f'✅ 全部音频 ({aq["high"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:high')],
-        [InlineKeyboardButton(f'✅ 全部音频 ({aq["original"][3]}) ({total} 个)', callback_data=f'ch:{uid}:audio:original')],
+        [InlineKeyboardButton(f'✅ 全部音频 (原质 192k) ({total} 个)', callback_data=f'ch:{uid}:audio:0')],
     ]
     if total <= 50:
         buttons.append([InlineKeyboardButton(
@@ -376,67 +344,6 @@ async def cmd_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode='Markdown'
     )
-
-
-async def _download_channel_direct(msg, uid: int, channel_title: str, entries: list, quality: str):
-    """直接下载频道（跳过按钮选择），用于命令行指定音质参数时。"""
-    total = len(entries)
-    channel_safe = re.sub(r'[<>:"/\\|?*]', '_', str(channel_title)).strip().rstrip(' .')
-    loop = asyncio.get_event_loop()
-
-    aq = AUDIO_QUALITY_PRESETS
-    quality_label = aq[quality][3] if quality in aq else '原质 192k'
-
-    await msg.edit_text(
-        f"⬇️ 开始下载频道：*{_esc_md(str(channel_title))}*\n"
-        f"共 {total} 个，音质：{quality_label}\n"
-        f"进度：0/{total}\n"
-        f"📂 按频道名组织目录",
-        parse_mode='Markdown'
-    )
-
-    success, failed = 0, 0
-    failed_items = []
-    for i, entry in enumerate(entries, 1):
-        if i > 1:
-            await asyncio.sleep(random.uniform(2, 5))
-
-        try:
-            await msg.edit_text(
-                f"⬇️ 下载 {i}/{total} — {_esc_md(str(entry['title'][:40]))}",
-                parse_mode='Markdown'
-            )
-
-            meta = await loop.run_in_executor(None, download_audio, entry['url'], channel_safe, quality)
-            meta['category'] = '油管上传'
-
-            result = await direct_upload(meta['file_path'], meta)
-            try:
-                os.remove(meta['file_path'])
-            except Exception:
-                pass
-            success += 1
-        except Exception as e:
-            logger.error(f'频道第{i}项失败: {e}')
-            failed += 1
-            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
-
-        # 每 5 项更新一次进度
-        if i % 5 == 0 or i == total:
-            await msg.edit_text(
-                f"⬇️ 下载频道中：{_esc_md(str(channel_title))}\n"
-                f"进度：{i}/{total} | ✅ {success} | ❌ {failed}\n"
-                f"音质：{quality_label}",
-                parse_mode='Markdown'
-            )
-
-    result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
-    result_msg += f"📺 {_esc_md(str(channel_title))}\n"
-    result_msg += f"✅ 成功：{success}\n"
-    if failed > 0:
-        result_msg += f"❌ 失败：{failed}"
-
-    await msg.edit_text(result_msg, parse_mode='Markdown')
 
 
 async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -496,7 +403,8 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for i, entry in enumerate(pl_info['entries'], 1):
                 try:
                     if fmt == 'audio':
-                        meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality=res if res != '0' else '')
+                        quality = res if res != '0' else ''
+                        meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality)
                     else:
                         meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
                     meta['category'] = '油管上传'
@@ -535,7 +443,9 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ch: → 平铺下载
-    fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
+    aq = AUDIO_QUALITY_PRESETS
+    quality_label = aq[res][3] if fmt == 'audio' and res in aq else ('原质 192k' if fmt == 'audio' else '')
+    fmt_label = f'音频 MP3 ({quality_label})' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
         f"⬇️ 开始下载频道：*{_esc_md(str(channel_title))}*\n"
         f"共 {total} 个，格式：{fmt_label}\n"
@@ -558,7 +468,8 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             subdir = channel_safe
             if fmt == 'audio':
-                meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality=res if res != '0' else '')
+                quality = res if res != '0' else ''
+                meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality)
             elif res == 'best':
                 meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
             else:
@@ -596,12 +507,12 @@ async def _show_format_picker(msg, url: str, uid: int):
 
     _cache_put(format_cache, uid, {'url': url, 'info': info})
 
-    audio_quality = AUDIO_QUALITY_PRESETS
+    aq = AUDIO_QUALITY_PRESETS
     buttons = [
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["low"][3]}', callback_data=f'fmt:{uid}:audio:low')],
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["medium"][3]}', callback_data=f'fmt:{uid}:audio:medium')],
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["high"][3]}', callback_data=f'fmt:{uid}:audio:high')],
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["original"][3]}', callback_data=f'fmt:{uid}:audio:original')],
+        [InlineKeyboardButton(f'🎵 MP3 {aq["low"][3]}', callback_data=f'fmt:{uid}:audio:low')],
+        [InlineKeyboardButton(f'🎵 MP3 {aq["medium"][3]}', callback_data=f'fmt:{uid}:audio:medium')],
+        [InlineKeyboardButton(f'🎵 MP3 {aq["high"][3]}', callback_data=f'fmt:{uid}:audio:high')],
+        [InlineKeyboardButton('🎵 MP3 原质 192k', callback_data=f'fmt:{uid}:audio:0')],
     ]
     for vf in info['video_formats']:
         buttons.append([InlineKeyboardButton(
@@ -632,12 +543,12 @@ async def callback_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     _cache_put(format_cache, uid, {'url': item['url'], 'info': info})
 
-    audio_quality = AUDIO_QUALITY_PRESETS
+    aq = AUDIO_QUALITY_PRESETS
     buttons = [
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["low"][3]}', callback_data=f'fmt:{uid}:audio:low')],
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["medium"][3]}', callback_data=f'fmt:{uid}:audio:medium')],
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["high"][3]}', callback_data=f'fmt:{uid}:audio:high')],
-        [InlineKeyboardButton(f'🎵 MP3 {audio_quality["original"][3]}', callback_data=f'fmt:{uid}:audio:original')],
+        [InlineKeyboardButton(f'🎵 MP3 {aq["low"][3]}', callback_data=f'fmt:{uid}:audio:low')],
+        [InlineKeyboardButton(f'🎵 MP3 {aq["medium"][3]}', callback_data=f'fmt:{uid}:audio:medium')],
+        [InlineKeyboardButton(f'🎵 MP3 {aq["high"][3]}', callback_data=f'fmt:{uid}:audio:high')],
+        [InlineKeyboardButton('🎵 MP3 原质 192k', callback_data=f'fmt:{uid}:audio:0')],
     ]
     for vf in info['video_formats']:
         buttons.append([InlineKeyboardButton(
@@ -664,11 +575,20 @@ async def callback_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     url = cached['url']
     info = cached['info']
 
-    audio_q = fmt_id if fmt == 'audio' else ''
+    # 解析音质参数（audio: low/medium/high/0）
+    quality = fmt_id if fmt == 'audio' else None
+    fmt_label = '音频 MP3'
+    if fmt == 'audio':
+        aq = AUDIO_QUALITY_PRESETS
+        q_label = aq[quality][3] if quality and quality in aq else '原质 192k'
+        fmt_label = f'音频 MP3 ({q_label})'
+    else:
+        fmt_label = f'视频 {fmt_id}p'
+
     await query.edit_message_text(
-        f"⬇️ 下载中：{'音频 ' + audio_q if fmt == 'audio' else f'视频 {fmt_id}p'}\n🎵 {info['title']}..."
+        f"⬇️ 下载中：{fmt_label}\n🎵 {info['title']}..."
     )
-    await _do_download_and_upload(query.message, url, {}, fmt, fmt_id if fmt == 'video' else None, audio_q)
+    await _do_download_and_upload(query.message, url, {}, fmt, fmt_id if fmt == 'video' else None, quality if fmt == 'audio' else None)
 
 async def _pipeline_process_entries(
     entries: list,
@@ -789,7 +709,7 @@ async def _pipeline_process_entries(
     return success, failed, failed_items
 
 
-async def _process_playlist_entries(query, info, entries, total, fmt, res, quality: str = ''):
+async def _process_playlist_entries(query, info, entries, total, fmt, res):
     """处理播放列表条目，带重试逻辑和失败收集。返回 (success, failed, failed_items)。"""
     success, failed = 0, 0
     failed_items = []
@@ -816,6 +736,7 @@ async def _process_playlist_entries(query, info, entries, total, fmt, res, quali
                 )
 
                 if fmt == 'audio':
+                    quality = res if res != '0' else ''
                     meta = await loop.run_in_executor(None, download_audio, entry['url'], '', quality)
                 elif res == 'best':
                     # 最高画质：跳过 get_formats，直接 bestvideo+bestaudio
@@ -863,7 +784,9 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     entries = info['entries']
     total = len(entries)
 
-    fmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
+    aq = AUDIO_QUALITY_PRESETS
+    quality_label = aq[res][3] if fmt == 'audio' and res in aq else ('原质 192k' if fmt == 'audio' else '')
+    fmt_label = f'音频 MP3 ({quality_label})' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
         f"⬇️ 开始下载播放列表：*{_esc_md(str(info['title']))}*\n"
         f"共 {total} 个，格式：{fmt_label}\n"
@@ -871,9 +794,8 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-    audio_q = fmt_id_to_quality(res) if fmt == 'audio' else ''
     success, failed, failed_items = await _process_playlist_entries(
-        query, info, entries, total, fmt, res, quality=audio_q
+        query, info, entries, total, fmt, res
     )
 
     # 构建最终消息
@@ -882,6 +804,7 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     result_msg += f"✅ 成功：{success}\n"
     if failed > 0:
         result_msg += f"❌ 失败：{failed}\n"
+        # 列出失败项标题（最多显示 5 个，避免消息过长）
         for item in failed_items[:5]:
             result_msg += f"   • {_esc_md(str(item['title'][:40]))}\n"
         if len(failed_items) > 5:
@@ -889,9 +812,10 @@ async def callback_playlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     buttons = []
     if failed > 0:
+        # 保存失败项到缓存，供重试按钮使用
         if 'failed_items' not in playlist_cache:
             _cache_put(playlist_cache, 'failed_items', {})
-        playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items, 'quality': audio_q}
+        playlist_cache['failed_items'][uid] = {'fmt': fmt, 'res': res, 'items': failed_items}
         buttons.append([InlineKeyboardButton(
             f'🔄 重试失败项 ({failed})',
             callback_data=f'rpl:{uid}:{fmt}:{res}'
@@ -918,9 +842,10 @@ async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAU
     failed_entries = cached['items']
     total = len(failed_entries)
     title = '重试失败项'
-    retry_quality = cached.get('quality', '')
 
-    rfmt_label = '音频 MP3' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
+    aq = AUDIO_QUALITY_PRESETS
+    rquality_label = aq[res][3] if fmt == 'audio' and res in aq else ('原质 192k' if fmt == 'audio' else '')
+    rfmt_label = f'音频 MP3 ({rquality_label})' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
     await query.edit_message_text(
         f"🔄 开始重试 {total} 个失败项...\n"
         f"格式：{rfmt_label}\n"
@@ -930,7 +855,7 @@ async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAU
 
     # 复用处理逻辑，把失败项当作 entries
     success, failed, failed_items2 = await _process_playlist_entries(
-        query, {'title': title}, failed_entries, total, fmt, res, quality=retry_quality
+        query, {'title': title}, failed_entries, total, fmt, res
     )
 
     result_msg = f"{'✅' if failed == 0 else '⚠️'} *重试完成*\n\n"
@@ -959,15 +884,16 @@ async def callback_retry_playlist_failed(update: Update, ctx: ContextTypes.DEFAU
 
 # ──────────────────核心逻辑──────────────────
 
-async def _do_download_and_upload(msg, url: str, metadata: dict, fmt: str, fmt_id, quality: str = ''):
+async def _do_download_and_upload(msg, url: str, metadata: dict, fmt: str, fmt_id, quality: str = None):
     loop = asyncio.get_event_loop()
     try:
         if fmt == 'video':
             await msg.edit_text('⬇️ 正在下载视频...')
             meta = await loop.run_in_executor(None, download_video, url, fmt_id)
         else:
-            await msg.edit_text('⬇️ 正在下载音频...')
-            meta = await loop.run_in_executor(None, download_audio, url, '', quality)
+            q_text = f'（{AUDIO_QUALITY_PRESETS[quality][3]}）' if quality and quality in AUDIO_QUALITY_PRESETS else ''
+            await msg.edit_text(f'⬇️ 正在下载音频 {q_text}...')
+            meta = await loop.run_in_executor(None, download_audio, url, '', quality or '')
 
         meta.update({k: v for k, v in metadata.items() if v})
 
@@ -2000,10 +1926,6 @@ def main():
         .base_url(f'{config.TG_API_BASE}/bot')
         .base_file_url(f'{config.TG_API_BASE}/file/bot')
         .local_mode(True)
-        .connect_timeout(30)
-        .read_timeout(300)
-        .write_timeout(300)
-        .pool_timeout(None)
         .post_init(post_init)
         .build()
     )

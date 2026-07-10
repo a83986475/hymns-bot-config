@@ -47,6 +47,7 @@ def _base_opts() -> dict:
         'no_warnings': True,
         'noplaylist': True,
         'js_runtimes': {'node': {}},
+        # 随机延迟 2~6 秒，避免触发 YouTube 速率限制
         'sleep_interval': 2,
         'max_sleep_interval': 6,
         'extractor_args': {
@@ -55,6 +56,7 @@ def _base_opts() -> dict:
             },
         },
     }
+    # POT provider 可选：检测到服务可用时才启用
     if _pot_provider_alive():
         logger.info('POT provider 已就绪，启用 yt-dlp POT 支持')
         opts['extractor_args']['youtubepot-bgutilhttp'] = {
@@ -71,57 +73,6 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(8192), b''):
             h.update(chunk)
     return h.hexdigest()
-
-
-# ── 音频质量预设 ──
-# quality -> (bitrate, sample_rate, channels, label)
-AUDIO_QUALITY_PRESETS = {
-    'original': ('192k', '44100', '2', '192k stereo'),
-    'low':    ('32k',  '22050', '1', '32k mono'),
-    'medium': ('64k',  '44100', '1', '64k mono'),
-    'high':   ('128k', '44100', '2', '128k stereo'),
-}
-
-def _compress_audio(input_path: str, quality: str) -> str:
-    """用 ffmpeg 压缩音频到指定质量，返回输出文件路径。"""
-    if quality not in AUDIO_QUALITY_PRESETS:
-        return input_path
-
-    bitrate, sample_rate, channels, _ = AUDIO_QUALITY_PRESETS[quality]
-    base, ext = os.path.splitext(input_path)
-    output_path = f"{base}_{quality}{ext}"
-
-    cmd = [
-        'ffmpeg', '-y', '-i', input_path,
-        '-ac', channels,
-        '-ar', sample_rate,
-        '-c:a', 'libmp3lame',
-        '-b:a', bitrate,
-        output_path,
-    ]
-    logger.info('压缩音频: %s → %s (%s)', os.path.basename(input_path), os.path.basename(output_path), quality)
-    try:
-        r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
-        if r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            # 用压缩后的文件替换原文件
-            os.remove(input_path)
-            os.rename(output_path, input_path)
-            logger.info('压缩完成: %s (%s)', os.path.basename(input_path), bitrate)
-        else:
-            logger.warning('压缩失败，保留原文件: %s', os.path.basename(input_path))
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.warning('压缩异常: %s', e)
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-            except Exception:
-                pass
-    return input_path
 
 
 def search_youtube(keyword: str, max_results: int = 5) -> list:
@@ -141,7 +92,10 @@ def search_youtube(keyword: str, max_results: int = 5) -> list:
         ]
 
 
+# 支持的分辨率白名单（最低 480p，不显示 360p 及以下）
 SUPPORTED_HEIGHTS = {480, 720, 1080, 1440, 2160, 4320}
+
+# 分辨率标签映射
 HEIGHT_LABELS = {
     2160: '2160p (4K)',
     4320: '4320p (8K)',
@@ -171,6 +125,7 @@ def get_formats(url: str) -> dict:
             })
     video_formats.sort(key=lambda x: x['height'])
 
+    # 估算音频文件大小：192kbps × 时长
     duration = info.get('duration', 0)
     audio_size_estimate = int(duration * 192 * 1000 / 8) if duration > 0 else 0
 
@@ -218,22 +173,46 @@ def _output_dir(subdir: str = '') -> str:
     return d
 
 
+# ── 音频质量预设 ──
+# quality_key → (bitrate, sample_rate, channels, label)
+AUDIO_QUALITY_PRESETS = {
+    'low':    ('32k',  '22050', '1', '32k mono'),
+    'medium': ('64k',  '44100', '1', '64k mono'),
+    'high':   ('128k', '44100', '2', '128k stereo'),
+}
+
+
+def _compress_audio(input_path: str, quality: str) -> str:
+    """用 ffmpeg 将音频压缩到指定质量，成功后替换原文件。"""
+    if quality not in AUDIO_QUALITY_PRESETS:
+        return input_path
+    bitrate, sample_rate, channels, _ = AUDIO_QUALITY_PRESETS[quality]
+    base, ext = os.path.splitext(input_path)
+    output_path = f"{base}_{quality}{ext}"
+    cmd = [
+        'ffmpeg', '-y', '-i', input_path,
+        '-ac', channels,
+        '-ar', sample_rate,
+        '-c:a', 'libmp3lame',
+        '-b:a', bitrate,
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+        os.replace(output_path, input_path)
+        logger.info(f'已压缩: {os.path.basename(input_path)} ({bitrate}, {sample_rate}Hz, {channels}ch)')
+    except Exception as e:
+        logger.warning(f'压缩失败 {input_path}: {e}')
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+    return input_path
+
+
 def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
-    """下载 YouTube 音频。
-
-    Args:
-        url: YouTube URL
-        subdir: 子目录（用于频道/播放列表组织）
-        quality: 音质预设，''/'original'=192k 原质, 'low'=32k, 'medium'=64k, 'high'=128k
-
-    Returns:
-        dict: 包含 file_path, title, artist, duration 等元数据
-    """
     output_dir = _output_dir(subdir)
-
-    # 一律下载 bestaudio 保证兼容性，低音质后续用 ffmpeg 压缩
-    needs_compress = quality and quality != 'original'
-
     ydl_opts = {
         **_base_opts(),
         'format': 'bestaudio/best',
@@ -248,9 +227,9 @@ def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
         info = ydl.extract_info(url, download=True)
         file_path = f"{output_dir}/{info['id']}.mp3"
 
-    # 低音质预设 → ffmpeg 压缩到目标比特率
-    if needs_compress:
-        file_path = _compress_audio(file_path, quality)
+    # 需要压缩时执行 ffmpeg 后端压缩
+    if quality and quality in AUDIO_QUALITY_PRESETS:
+        _compress_audio(file_path, quality)
 
     return {
         'file_path': file_path,
@@ -267,6 +246,7 @@ def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
 
 def download_video(url: str, format_id: str, subdir: str = '') -> dict:
     output_dir = _output_dir(subdir)
+    # format_id 处理：支持预设值（''/''best''/''1080''/''720''）或具体 format_id
     if not format_id or format_id in ('best', ''):
         format_str = 'bestvideo+bestaudio/best'
     elif format_id == '1080':
