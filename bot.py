@@ -516,51 +516,52 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     success, failed = 0, 0
     failed_items = []
     cancelled = False
-    for i, entry in enumerate(entries, 1):
-        if i > 1:
-            await asyncio.sleep(random.uniform(2, 5))
+    try:
+        for i, entry in enumerate(entries, 1):
+            if i > 1:
+                await asyncio.sleep(random.uniform(2, 5))
 
-        # 检查取消请求
-        if query.from_user.id in _channel_cancel_reqs:
-            logger.info(f'用户 {query.from_user.id} 取消频道下载（ch: 路径）')
-            cancelled = True
-            break
+            # 检查取消请求
+            if query.from_user.id in _channel_cancel_reqs:
+                logger.info(f'用户 {query.from_user.id} 取消频道下载（ch: 路径）')
+                cancelled = True
+                break
 
-        try:
-            await query.edit_message_text(
-                f"⬇️ 下载 {i}/{total} — {_esc_md(str(entry['title'][:40]))}",
-                parse_mode='Markdown'
-            )
-
-            subdir = channel_safe
-            if fmt == 'audio':
-                quality = res if res != '0' else ''
-                meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality)
-            elif res == 'best':
-                meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
-            else:
-                meta = await loop.run_in_executor(None, download_video, entry['url'], res, subdir)
-            meta['category'] = '油管上传'
-
-            result = await direct_upload(meta['file_path'], meta)
             try:
-                os.remove(meta['file_path'])
-            except Exception:
-                pass
-            success += 1
-        except Exception as e:
-            err_msg = str(e)[:100]
-            logger.error(f'频道第{i}项失败: {e}')
-            failed += 1
-            failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
-            await query.edit_message_text(
-                f"⬇️ {i}/{total} — {_esc_md(str(entry['title'][:35]))}\n"
-                f"❌ 失败: {_esc_md(err_msg)}",
-                parse_mode='Markdown'
-            )
+                await query.edit_message_text(
+                    f"⬇️ 下载 {i}/{total} — {_esc_md(str(entry['title'][:40]))}",
+                    parse_mode='Markdown'
+                )
 
-    # 清除取消标志
-    _channel_cancel_reqs.discard(query.from_user.id)
+                subdir = channel_safe
+                if fmt == 'audio':
+                    quality = res if res != '0' else ''
+                    meta = await loop.run_in_executor(None, download_audio, entry['url'], subdir, quality)
+                elif res == 'best':
+                    meta = await loop.run_in_executor(None, download_video, entry['url'], 'best', subdir)
+                else:
+                    meta = await loop.run_in_executor(None, download_video, entry['url'], res, subdir)
+                meta['category'] = '油管上传'
+
+                result = await direct_upload(meta['file_path'], meta)
+                try:
+                    os.remove(meta['file_path'])
+                except Exception:
+                    pass
+                success += 1
+            except Exception as e:
+                err_msg = str(e)[:100]
+                logger.error(f'频道第{i}项失败: {e}')
+                failed += 1
+                failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
+                await query.edit_message_text(
+                    f"⬇️ {i}/{total} — {_esc_md(str(entry['title'][:35]))}\n"
+                    f"❌ 失败: {_esc_md(err_msg)}",
+                    parse_mode='Markdown'
+                )
+    finally:
+        # 清除取消标志（确保无论异常还是取消都执行）
+        _channel_cancel_reqs.discard(query.from_user.id)
 
     if cancelled:
         result_msg = f'🛑 *频道下载已取消*\n\n'
