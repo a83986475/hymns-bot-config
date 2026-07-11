@@ -182,10 +182,58 @@ AUDIO_QUALITY_PRESETS = {
 }
 
 
-def _compress_audio(input_path: str, quality: str) -> str:
-    """用 ffmpeg 将音频压缩到指定质量，成功后替换原文件。"""
+_MUSIC_KEYWORDS = [
+    "诗歌", "赞美", "敬拜", "worship", "hymn", "song", "music",
+    "sing", "praise", "chorus", "anthem", "psalm", "赞美诗",
+    "颂赞", "歌颂", "ccli", "新歌", "耶和华", "hosanna",
+]
+
+_SERMON_KEYWORDS = [
+    "讲道", "证道", "主日", "信息", "分享", "查经", "灵修",
+    "门徒", "研经", "见证", "培灵", "sermon", "message", "teaching",
+    "preach", "preaching", "bible study", "bible teaching",
+    "研读", "圣经", "福音", "真理", "信仰", "恩典", "救恩",
+    "约翰", "马太", "马可", "路加", "使徒", "罗马书",
+]
+
+
+def _detect_content_type(title: str = '', description: str = '') -> str:
+    """
+    根据视频标题和描述自动判断内容类型。
+    返回 'music' 或 'sermon'，无法判断时返回 ''。
+    """
+    text = f"{title} {description}".lower()
+    music_score = sum(1 for kw in _MUSIC_KEYWORDS if kw in text)
+    sermon_score = sum(1 for kw in _SERMON_KEYWORDS if kw in text)
+    if music_score > sermon_score:
+        return 'music'
+    if sermon_score > music_score:
+        return 'sermon'
+    return ''
+
+
+def _compress_audio(input_path: str, quality: str, title: str = '', description: str = '') -> str:
+    """用 ffmpeg 将音频压缩到指定质量，成功后替换原文件。
+
+    当 quality='low'（32k mono）时，自动检测内容类型：
+    - 诗歌/敬拜类 → 跳过压缩（保持 192k stereo）
+    - 讲道/信息类 → 压缩为 32k mono
+    """
     if quality not in AUDIO_QUALITY_PRESETS:
         return input_path
+
+    # ══ 自动音质选择 ══
+    # 用户选了最低音质（32k）时，检测是否诗歌类——诗歌保留高音质，讲道才压缩
+    if quality == 'low':
+        content_type = _detect_content_type(title, description)
+        if content_type == 'music':
+            logger.info(f'🎵 检测为诗歌/敬拜，跳过压缩（保持 192k）: {title}')
+            return input_path
+        if content_type == 'sermon':
+            logger.info(f'🎙️ 检测为讲道/信息，压缩为 32k: {title}')
+        else:
+            logger.info(f'无法判断内容类型，默认压缩为 32k: {title}')
+
     bitrate, sample_rate, channels, _ = AUDIO_QUALITY_PRESETS[quality]
     base, ext = os.path.splitext(input_path)
     output_path = f"{base}_{quality}{ext}"
@@ -227,9 +275,9 @@ def download_audio(url: str, subdir: str = '', quality: str = '') -> dict:
         info = ydl.extract_info(url, download=True)
         file_path = f"{output_dir}/{info['id']}.mp3"
 
-    # 需要压缩时执行 ffmpeg 后端压缩
+    # 需要压缩时执行 ffmpeg 后端压缩（自动检测内容类型，诗歌跳过压缩）
     if quality and quality in AUDIO_QUALITY_PRESETS:
-        _compress_audio(file_path, quality)
+        _compress_audio(file_path, quality, info.get('title', ''), info.get('description', ''))
 
     return {
         'file_path': file_path,
