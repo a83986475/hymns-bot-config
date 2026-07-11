@@ -527,17 +527,16 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                 total_failed += 1
                                 all_failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
 
-                    # 更新进度（在重试循环之外，每 5 项更新一次）
-                    if i % 5 == 0 or i == len(pl_info['entries']):
-                        try:
-                            await query.edit_message_text(
-                                f"📂 播放列表 {pl_idx}/{len(playlists)}：{_esc_md(str(pl['title']))}\n"
-                                f"进度：{i}/{len(pl_info['entries'])} | "
-                                f"✅ {total_success} | ❌ {total_failed}",
-                                parse_mode='Markdown'
-                            )
-                        except Exception:
-                            pass  # 编辑失败不级联异常
+                    # 每项结束后更新进度（更实时）
+                    try:
+                        await query.edit_message_text(
+                            f"📂 播放列表 {pl_idx}/{len(playlists)} {i}/{len(pl_info['entries'])} | "
+                            f"✅ {total_success} ❌ {total_failed}\n"
+                            f"{_esc_md(str(entry['title'][:40]))}",
+                            parse_mode='Markdown'
+                        )
+                    except Exception:
+                        pass  # 编辑失败不级联异常
 
                     # 每项之间延迟
                     await asyncio.sleep(random.uniform(1, 3))
