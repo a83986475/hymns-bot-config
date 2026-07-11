@@ -577,12 +577,6 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cancelled = False
     try:
         for i, entry in enumerate(entries, 1):
-            # 🚧 调试模式：只处理第一项，测完删除此限制
-            _DEBUG_MAX = 1
-            if i > _DEBUG_MAX:
-                logger.info(f'🔧 调试限制：只处理前 {_DEBUG_MAX} 项，跳过第 {i} 项')
-                break
-
             if i > 1:
                 await asyncio.sleep(random.uniform(2, 5))
 
@@ -644,16 +638,15 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         failed += 1
                         failed_items.append({'title': entry.get('title', ''), 'url': entry.get('url', '')})
 
-            # 更新进度（在重试循环之外，每 5 项更新一次）
-            if i % 5 == 0 or i == total:
-                try:
-                    await query.edit_message_text(
-                        f"⬇️ {i}/{total} — {_esc_md(str(entry['title'][:35]))}\n"
-                        f"✅ {success} | ❌ {failed}",
-                        parse_mode='Markdown'
-                    )
-                except Exception:
-                    pass
+            # 每项结束后更新进度（更实时）
+            try:
+                await query.edit_message_text(
+                    f"⬇️ {i}/{total} | ✅ {success} ❌ {failed}\n"
+                    f"{_esc_md(str(entry['title'][:40]))}",
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                pass
     finally:
         # 清除取消标志（确保无论异常还是取消都执行）
         _channel_cancel_reqs.discard(query.from_user.id)
