@@ -151,7 +151,8 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=600) as client:
+            # Telegram 上传直连，不经过代理（代理对大文件上传不稳定）
+            async with httpx.AsyncClient(proxy=None, timeout=600) as client:
                 files = {field: (chunk_name, chunk_data, mime_type)}
                 resp = await client.post(url, data=data, files=files)
 
