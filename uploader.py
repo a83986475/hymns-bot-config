@@ -23,15 +23,17 @@ _worker_client: httpx.AsyncClient | None = None
 _worker_client_lock = asyncio.Lock()
 
 
-async def _get_worker_client(timeout: float = 30) -> httpx.AsyncClient:
-    """获取共享的 httpx 客户端（用于 Worker API 调用，proxy=None 绕过 Clash）。"""
+async def _get_worker_client() -> httpx.AsyncClient:
+    """获取共享的 httpx 客户端（用于 Worker API 调用，proxy=None 绕过 Clash）。
+    各调用点通过请求级 timeout 参数控制超时，共享客户端仅负责连接池复用。
+    """
     global _worker_client
     if _worker_client is None:
         async with _worker_client_lock:
             if _worker_client is None:
                 limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
                 _worker_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(timeout),
+                    timeout=httpx.Timeout(600.0),  # 默认最长超时，各请求自行覆盖
                     proxy=None,
                     limits=limits,
                 )
@@ -42,10 +44,11 @@ async def refresh_jwt() -> str:
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            client = await _get_worker_client(15)
+            client = await _get_worker_client()
             resp = await client.post(
                 f"{config.CF_WORKER_URL}/api/admin/login",
-                json={"token": config.CF_API_KEY}
+                json={"token": config.CF_API_KEY},
+                timeout=15,
             )
             jwt = resp.json().get("sessionToken", "")
             if jwt:
@@ -75,11 +78,12 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
         return None
     params = {"hash": sha256, "name": file_name, "size": str(file_size)}
     try:
-        client = await _get_worker_client(10)
+        client = await _get_worker_client()
         resp = await client.get(
             f"{config.CF_WORKER_URL}/api/check-duplicate",
             params=params,
             headers=_admin_headers(),
+            timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -118,11 +122,12 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                client = await _get_worker_client(30)
+                client = await _get_worker_client()
                 return await client.post(
                     f"{config.CF_WORKER_URL}/api/hymns/import",
                     headers={**_admin_headers(), "Content-Type": "application/json"},
-                    json=payload
+                    json=payload,
+                    timeout=30,
                 )
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
                 if attempt < max_retries - 1:
@@ -146,10 +151,11 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
 async def _get_upload_bot_token() -> dict:
     """从 Worker BotPool 获取一个上传用的 bot token（轮询分配）。返回 {token, bot_index}，失败时回退到自身。"""
     try:
-        client = await _get_worker_client(10)
+        client = await _get_worker_client()
         resp = await client.get(
             f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
-            headers=_admin_headers()
+            headers=_admin_headers(),
+            timeout=10,
         )
         if resp.status_code == 200:
             return resp.json()
@@ -176,12 +182,13 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
             data = {"file_name": chunk_name}
             if caption:
                 data["caption"] = caption
-            client = await _get_worker_client(600)
+            client = await _get_worker_client()
             resp = await client.post(
                 f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
                 files=files,
                 data=data,
                 headers=_admin_headers(),
+                timeout=600,
             )
             if resp.status_code == 200:
                 result = resp.json()
