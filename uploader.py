@@ -56,7 +56,7 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
     try:
         async with httpx.AsyncClient(timeout=10, proxy=None) as client:
             resp = await client.get(
-                f"{config.CF_WORKER_URL}/api/files/check-duplicate",
+                f"{config.CF_WORKER_URL}/api/check-duplicate",
                 params=params,
                 headers=_admin_headers(),
             )
