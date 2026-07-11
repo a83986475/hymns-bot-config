@@ -182,18 +182,24 @@ AUDIO_QUALITY_PRESETS = {
 }
 
 
+# 诗歌/敬拜关键词（命中 → 保持 192k 高音质）
 _MUSIC_KEYWORDS = [
-    "诗歌", "赞美", "敬拜", "worship", "hymn", "song", "music",
-    "sing", "praise", "chorus", "anthem", "psalm", "赞美诗",
-    "颂赞", "歌颂", "ccli", "新歌", "耶和华", "hosanna",
+    "诗歌", "赞美", "敬拜", "worship", "hymn", "worship cover",
+    "praise", "chorus", "anthem", "赞美诗", "颂赞", "歌颂",
+    "新歌", "hosanna", "ccli",
 ]
 
+# 讲道/信息关键词（命中 → 压缩 32k mono）
+# 基于 TheHopeTV 频道实际标题分析：
+# - 几乎所有讲道视频标题都含「牧師」「Pastor」「牧者」
+# - 其他常见词：主日、特会、生命見證、信息
 _SERMON_KEYWORDS = [
-    "讲道", "证道", "主日", "信息", "分享", "查经", "灵修",
-    "门徒", "研经", "见证", "培灵", "sermon", "message", "teaching",
-    "preach", "preaching", "bible study", "bible teaching",
-    "研读", "圣经", "福音", "真理", "信仰", "恩典", "救恩",
-    "约翰", "马太", "马可", "路加", "使徒", "罗马书",
+    "牧師", "pastor", "牧者", "主日", "特會", "特会",
+    "生命見證", "生命见证", "短宣", "讲道", "證道", "证道",
+    "信息", "sermon", "message", "teaching", "teachings",
+    "preach", "preaching", "testimony", "conference",
+    "研經", "研经", "查經", "查经", "靈修", "灵修",
+    "門徒", "门徒", "培靈", "培灵",
 ]
 
 

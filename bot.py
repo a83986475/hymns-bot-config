@@ -76,6 +76,50 @@ _channel_cancel_reqs: set[int] = set()
 # 频道目录 ID 缓存（避免重复 API 调用）
 _channel_folder_id_cache: dict[str, int] = {}  # channel_title -> folder_id
 
+# ── 下载续传 checkpoint ──
+# 记录已成功处理的视频 ID，Bot 重启或 SSH 断连后重新下载时可跳过已完成项
+_CHANNEL_CHECKPOINT_DIR = os.environ.get('CHANNEL_CHECKPOINT_DIR', config.DOWNLOAD_DIR)
+
+
+def _get_video_id_from_url(url: str) -> str:
+    """从 YouTube URL 提取视频 ID"""
+    m = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
+    return m.group(1) if m else ''
+
+
+def _load_checkpoint(channel_key: str) -> set:
+    """加载续传 checkpoint，返回已处理过的视频 ID 集合。"""
+    path = os.path.join(_CHANNEL_CHECKPOINT_DIR, f'checkpoint_{channel_key}.json')
+    try:
+        with open(path, 'r') as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+
+def _save_checkpoint(channel_key: str, video_id: str):
+    """记录一个视频 ID 到 checkpoint（已成功处理）。"""
+    path = os.path.join(_CHANNEL_CHECKPOINT_DIR, f'checkpoint_{channel_key}.json')
+    try:
+        processed = _load_checkpoint(channel_key)
+        processed.add(video_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(list(processed), f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f'checkpoint 写入失败: {e}')
+
+
+def _clear_checkpoint(channel_key: str):
+    """全部完成后清理 checkpoint。"""
+    path = os.path.join(_CHANNEL_CHECKPOINT_DIR, f'checkpoint_{channel_key}.json')
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f'checkpoint 已清理: {channel_key}')
+    except Exception:
+        pass
+
 # 追踪当前正在通过 HTTP 流式传输的文件（磁盘满时紧急清理用）
 _active_streams: set = set()
 
@@ -564,6 +608,13 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     aq = AUDIO_QUALITY_PRESETS
     quality_label = aq[res][3] if fmt == 'audio' and res in aq else ('原质 192k' if fmt == 'audio' else '')
     fmt_label = f'音频 MP3 ({quality_label})' if fmt == 'audio' else ('视频最高画质' if res == 'best' else f'视频 {res}p')
+
+    # ── 加载续传 checkpoint ──
+    channel_key = re.sub(r'[^a-zA-Z0-9]', '_', channel_title)[:50]
+    checkpoint = _load_checkpoint(channel_key)
+    if checkpoint:
+        logger.info(f'⏭️ 找到 checkpoint: {len(checkpoint)} 个视频已处理过，将跳过这些')
+
     await query.edit_message_text(
         f"⬇️ 开始下载频道：*{_esc_md(str(channel_title))}*\n"
         f"共 {total} 个，格式：{fmt_label}\n"
@@ -573,10 +624,18 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     success, failed = 0, 0
+    skipped = 0
     failed_items = []
     cancelled = False
     try:
         for i, entry in enumerate(entries, 1):
+            # ══ 续传检查 ══
+            entry_vid = _get_video_id_from_url(entry['url'])
+            if entry_vid and entry_vid in checkpoint:
+                skipped += 1
+                logger.info(f'⏭️ {i}/{total} 已处理过，跳过: {entry["title"][:40]}')
+                continue
+
             if i > 1:
                 await asyncio.sleep(random.uniform(2, 5))
 
@@ -626,6 +685,9 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         os.remove(meta['file_path'])
                     except Exception:
                         pass
+                    # ══ 记录 checkpoint ══
+                    if entry_vid:
+                        _save_checkpoint(channel_key, entry_vid)
                     success += 1
                     break  # 成功后退出重试循环
 
@@ -656,13 +718,23 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         result_msg += f"📺 {_esc_md(str(channel_title))}\n"
         result_msg += f"✅ 已完成：{success}\n"
         result_msg += f"❌ 失败：{failed}\n"
+        result_msg += f"⏭️ 跳过（已处理）：{skipped}\n"
         result_msg += f"⚡ 已处理 {success + failed} 项"
-    else:
-        result_msg = f"{'✅' if failed == 0 else '⚠️'} *频道下载完成*\n\n"
+    elif failed == 0:
+        # 全部成功 → 清理 checkpoint
+        _clear_checkpoint(channel_key)
+        result_msg = f"✅ *频道下载完成*\n\n"
         result_msg += f"📺 {_esc_md(str(channel_title))}\n"
         result_msg += f"✅ 成功：{success}\n"
-        if failed > 0:
-            result_msg += f"❌ 失败：{failed}"
+        if skipped:
+            result_msg += f"⏭️ 跳过（已处理）：{skipped}\n"
+    else:
+        result_msg = f"⚠️ *频道下载完成（部分失败）*\n\n"
+        result_msg += f"📺 {_esc_md(str(channel_title))}\n"
+        result_msg += f"✅ 成功：{success}\n"
+        result_msg += f"❌ 失败：{failed}\n"
+        if skipped:
+            result_msg += f"⏭️ 跳过（已处理）：{skipped}"
 
     await query.edit_message_text(result_msg, parse_mode='Markdown')
 
