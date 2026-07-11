@@ -132,9 +132,43 @@ async def _get_upload_bot_token() -> dict:
 
 
 async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, is_video: bool, caption: str = None, bot_token: str = None, bot_index: int = None) -> dict:
-    """上传单个分片到 Telegram，返回 file_id 和 bot_index"""
-    _token = bot_token or config.BOT_TOKEN
+    """上传单个分片到 Telegram，返回 file_id 和 bot_index
+
+    优先走 Worker 代理（Cloudflare 直连 Telegram API，绕过国内服务器的 Clash 代理），
+    代理失败时兜底直连 TG（走 Clash 代理）。
+    """
     _bot_index = bot_index if bot_index is not None else config.BOT_INDEX
+
+    # ── Worker 代理上传（绕过 Clash 代理，Worker 直连 Telegram API）──
+    # 国内阿里云服务器的 Clash 代理对大文件上传不稳定，优先走 Worker
+    if config.CF_WORKER_URL:
+        try:
+            # 构造 multipart/form-data 请求
+            files = {"file": (chunk_name, chunk_data, mime_type)}
+            data = {"file_name": chunk_name}
+            if caption:
+                data["caption"] = caption
+            async with httpx.AsyncClient(timeout=600) as client:
+                resp = await client.post(
+                    f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
+                    files=files,
+                    data=data,
+                    headers=_admin_headers(),
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("success"):
+                        return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
+                else:
+                    body = resp.text[:200]
+                    logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
+        except Exception as e:
+            logger.warning(f'Worker 代理上传失败，回退直连 TG: {e}')
+    else:
+        logger.info('未配置 CF_WORKER_URL，跳过 Worker 代理，直连 TG')
+
+    # ── 直连 TG（走 Clash 代理）──
+    _token = bot_token or config.BOT_TOKEN
     data = {"chat_id": config.STORAGE_CHAT_ID}
     if caption:
         data["caption"] = caption
