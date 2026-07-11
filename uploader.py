@@ -16,50 +16,28 @@ logger = logging.getLogger(__name__)
 # 与前端直接上传到网站的分片大小一致（前端 upload.js 也使用 18MB）。
 CHUNK_SIZE = 18 * 1024 * 1024
 
-# ── 共享 httpx 客户端（Worker API 调用）──
-# 每次 API 调用创建新客户端会导致 TCP 连接耗尽、临时端口耗尽，
-# 最终出现 ConnectError（空消息）。共享客户端复用连接池，避免此问题。
-# 注意：不设 proxy=None，让 Docker 容器使用默认网络栈。
-_worker_client: httpx.AsyncClient | None = None
-_worker_client_lock = asyncio.Lock()
-
-
-async def _get_worker_client() -> httpx.AsyncClient:
-    """获取共享的 httpx 客户端（用于 Worker API 调用）。
-    各调用点通过请求级 timeout 参数控制超时，共享客户端仅负责连接池复用。
-    """
-    global _worker_client
-    if _worker_client is None:
-        async with _worker_client_lock:
-            if _worker_client is None:
-                _worker_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(600.0),  # 默认最长超时，各请求自行覆盖
-                )
-    return _worker_client
-
 
 async def refresh_jwt() -> str:
+    """刷新 JWT。失败时不抛异常，静默返回空字符串（后续调用直接用 X-Admin-Token 兜底）。"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            client = await _get_worker_client()
-            resp = await client.post(
-                f"{config.CF_WORKER_URL}/api/admin/login",
-                json={"token": config.CF_API_KEY},
-                timeout=15,
-            )
-            jwt = resp.json().get("sessionToken", "")
-            if jwt:
-                config.CF_JWT = jwt
-            return jwt
-        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{config.CF_WORKER_URL}/api/admin/login",
+                    json={"token": config.CF_API_KEY}
+                )
+                jwt = resp.json().get("sessionToken", "")
+                if jwt:
+                    config.CF_JWT = jwt
+                return jwt
+        except Exception as e:
             if attempt < max_retries - 1:
                 delay = 2 ** attempt
-                logger.warning(f'JWT 刷新网络错误（{type(e).__name__}），{delay}s 后第 {attempt+2} 次重试')
+                logger.warning(f'JWT 刷新失败（{type(e).__name__}），{delay}s 后第 {attempt+2} 次重试')
                 await asyncio.sleep(delay)
                 continue
-            logger.error(f'JWT 刷新重试 {max_retries} 次后仍失败: {e}')
-            raise
+            logger.warning(f'JWT 刷新重试 {max_retries} 次后仍失败: {e}（使用 X-Admin-Token 兜底）')
     return ""
 
 
@@ -76,13 +54,12 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
         return None
     params = {"hash": sha256, "name": file_name, "size": str(file_size)}
     try:
-        client = await _get_worker_client()
-        resp = await client.get(
-            f"{config.CF_WORKER_URL}/api/check-duplicate",
-            params=params,
-            headers=_admin_headers(),
-            timeout=10,
-        )
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{config.CF_WORKER_URL}/api/check-duplicate",
+                params=params,
+                headers=_admin_headers(),
+            )
         if resp.status_code == 200:
             data = resp.json()
             if data.get("exists"):
@@ -120,13 +97,12 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                client = await _get_worker_client()
-                return await client.post(
-                    f"{config.CF_WORKER_URL}/api/hymns/import",
-                    headers={**_admin_headers(), "Content-Type": "application/json"},
-                    json=payload,
-                    timeout=30,
-                )
+                async with httpx.AsyncClient(timeout=30) as client:
+                    return await client.post(
+                        f"{config.CF_WORKER_URL}/api/hymns/import",
+                        headers={**_admin_headers(), "Content-Type": "application/json"},
+                        json=payload
+                    )
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
                 if attempt < max_retries - 1:
                     delay = 2 ** attempt
@@ -149,14 +125,13 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
 async def _get_upload_bot_token() -> dict:
     """从 Worker BotPool 获取一个上传用的 bot token（轮询分配）。返回 {token, bot_index}，失败时回退到自身。"""
     try:
-        client = await _get_worker_client()
-        resp = await client.get(
-            f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
-            headers=_admin_headers(),
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return resp.json()
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
+                headers=_admin_headers()
+            )
+            if resp.status_code == 200:
+                return resp.json()
     except Exception:
         pass
     # 回退：使用自己的 token
@@ -172,29 +147,26 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
     _bot_index = bot_index if bot_index is not None else config.BOT_INDEX
 
     # ── Worker 代理上传（绕过 Clash 代理，Worker 直连 Telegram API）──
-    # 国内阿里云服务器的 Clash 代理对大文件上传不稳定，优先走 Worker
     if config.CF_WORKER_URL:
         try:
-            # 构造 multipart/form-data 请求
             files = {"file": (chunk_name, chunk_data, mime_type)}
             data = {"file_name": chunk_name}
             if caption:
                 data["caption"] = caption
-            client = await _get_worker_client()
-            resp = await client.post(
-                f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
-                files=files,
-                data=data,
-                headers=_admin_headers(),
-                timeout=600,
-            )
-            if resp.status_code == 200:
-                result = resp.json()
-                if result.get("success"):
-                    return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
-            else:
-                body = resp.text[:200]
-                logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
+            async with httpx.AsyncClient(timeout=600) as client:
+                resp = await client.post(
+                    f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
+                    files=files,
+                    data=data,
+                    headers=_admin_headers(),
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("success"):
+                        return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
+                else:
+                    body = resp.text[:200]
+                    logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
         except Exception as e:
             logger.warning(f'Worker 代理上传失败，回退直连 TG: {e}')
     else:
@@ -231,7 +203,6 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
                 continue
 
             if resp.status_code == 413:
-                # 分片过大，缩小分片无意义，直接报错
                 raise Exception(
                     f'TG 413 Payload Too Large：分片 {chunk_name} ({len(chunk_data)} bytes) '
                     '超过 Telegram Bot API 上传上限（50MB），请减小 CHUNK_SIZE'
@@ -285,15 +256,13 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, sk
     mime_type = metadata.get("mime_type", "audio/mpeg")
     is_video = mime_type and mime_type.startswith("video/")
 
-    # ── MP4 faststart：将 moov atom 移到文件开头，优化浏览器播放启动速度 ──
-    # 仅对 MP4 视频文件执行（使用 ffmpeg -c copy 无需重新编码，仅移动元数据）
+    # ── MP4 faststart ──
     if is_video and fname.lower().endswith('.mp4'):
         import logging
         logger = logging.getLogger(__name__)
         try:
             import subprocess
             import tempfile
-            # 用临时文件存储处理后的视频
             tmp_fd, tmp_path = tempfile.mkstemp(suffix='.mp4')
             os.close(tmp_fd)
             result = subprocess.run(
@@ -301,22 +270,18 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, sk
                 capture_output=True, text=True, timeout=120
             )
             if result.returncode == 0:
-                # 用处理后的文件替换原文件
                 orig_path = file_path
                 os.remove(orig_path)
                 os.rename(tmp_path, orig_path)
-                # 更新文件大小
                 file_size = os.path.getsize(orig_path)
                 logger.info(f'faststart 优化完成: {fname}')
             else:
                 logger.warning(f'faststart 失败 (returncode={result.returncode}): {result.stderr[:200]}')
-                # 清理临时文件
                 try:
                     os.remove(tmp_path)
                 except Exception:
                     pass
         except FileNotFoundError:
-            # ffmpeg 不可用，跳过 faststart
             pass
         except subprocess.TimeoutExpired:
             logger.warning(f'faststart 超时: {fname}')
@@ -331,8 +296,7 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, sk
             except Exception:
                 pass
 
-    # 秒传检测：有 sha256 才检测，命中则跳过 TG 上传
-    # skip_import=True（TG CDN 模式）时跳过，因为需要返回 file_parts 供 Worker 代理下载
+    # 秒传检测
     if not skip_import and sha256:
         dup = await check_duplicate(sha256, fname, file_size)
         if dup:
@@ -341,7 +305,6 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, sk
     file_parts = []
 
     if file_size <= CHUNK_SIZE:
-        # ── 小文件：直接上传，不分片 ──
         caption = (
             f"\U0001f3ac {metadata.get('title', fname)}"
             if is_video
@@ -349,15 +312,11 @@ async def _do_upload(file_path: str, metadata: dict, uploader_id: int = None, sk
         )
         with open(file_path, "rb") as f:
             chunk_data = f.read()
-        # 从 BotPool 获取上传 token（分布式上传）
         token_data = await _get_upload_bot_token()
         result = await _tg_upload_chunk(chunk_data, fname, mime_type, is_video, caption,
                                         token_data["token"], token_data["bot_index"])
         file_parts.append({"id": result["file_id"], "b": result.get("b", token_data["bot_index"])})
     else:
-        # ── 大文件：分片串行上传 ──
-        # 串行上传：每个分片逐个上传，_tg_upload_chunk 内部已含 5 次重试
-        # 避免并行上传时一个分片失败导致 asyncio.gather 取消其余分片，产生孤儿分片
         total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
         with open(file_path, "rb") as f:
             for i in range(total_chunks):
