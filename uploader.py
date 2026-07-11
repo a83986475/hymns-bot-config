@@ -16,20 +16,41 @@ logger = logging.getLogger(__name__)
 # 与前端直接上传到网站的分片大小一致（前端 upload.js 也使用 18MB）。
 CHUNK_SIZE = 18 * 1024 * 1024
 
+# ── 共享 httpx 客户端（Worker API 调用）──
+# 每次 API 调用创建新客户端会导致 TCP 连接耗尽、临时端口耗尽，
+# 最终出现 ConnectError（空消息）。共享客户端复用连接池，避免此问题。
+_worker_client: httpx.AsyncClient | None = None
+_worker_client_lock = asyncio.Lock()
+
+
+async def _get_worker_client(timeout: float = 30) -> httpx.AsyncClient:
+    """获取共享的 httpx 客户端（用于 Worker API 调用，proxy=None 绕过 Clash）。"""
+    global _worker_client
+    if _worker_client is None:
+        async with _worker_client_lock:
+            if _worker_client is None:
+                limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                _worker_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout),
+                    proxy=None,
+                    limits=limits,
+                )
+    return _worker_client
+
 
 async def refresh_jwt() -> str:
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=15, proxy=None) as client:
-                resp = await client.post(
-                    f"{config.CF_WORKER_URL}/api/admin/login",
-                    json={"token": config.CF_API_KEY}
-                )
-                jwt = resp.json().get("sessionToken", "")
-                if jwt:
-                    config.CF_JWT = jwt
-                return jwt
+            client = await _get_worker_client(15)
+            resp = await client.post(
+                f"{config.CF_WORKER_URL}/api/admin/login",
+                json={"token": config.CF_API_KEY}
+            )
+            jwt = resp.json().get("sessionToken", "")
+            if jwt:
+                config.CF_JWT = jwt
+            return jwt
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
             if attempt < max_retries - 1:
                 delay = 2 ** attempt
@@ -54,12 +75,12 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
         return None
     params = {"hash": sha256, "name": file_name, "size": str(file_size)}
     try:
-        async with httpx.AsyncClient(timeout=10, proxy=None) as client:
-            resp = await client.get(
-                f"{config.CF_WORKER_URL}/api/check-duplicate",
-                params=params,
-                headers=_admin_headers(),
-            )
+        client = await _get_worker_client(10)
+        resp = await client.get(
+            f"{config.CF_WORKER_URL}/api/check-duplicate",
+            params=params,
+            headers=_admin_headers(),
+        )
         if resp.status_code == 200:
             data = resp.json()
             if data.get("exists"):
@@ -97,12 +118,12 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                async with httpx.AsyncClient(timeout=30, proxy=None) as client:
-                    return await client.post(
-                        f"{config.CF_WORKER_URL}/api/hymns/import",
-                        headers={**_admin_headers(), "Content-Type": "application/json"},
-                        json=payload
-                    )
+                client = await _get_worker_client(30)
+                return await client.post(
+                    f"{config.CF_WORKER_URL}/api/hymns/import",
+                    headers={**_admin_headers(), "Content-Type": "application/json"},
+                    json=payload
+                )
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
                 if attempt < max_retries - 1:
                     delay = 2 ** attempt
@@ -125,13 +146,13 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
 async def _get_upload_bot_token() -> dict:
     """从 Worker BotPool 获取一个上传用的 bot token（轮询分配）。返回 {token, bot_index}，失败时回退到自身。"""
     try:
-        async with httpx.AsyncClient(timeout=10, proxy=None) as client:
-            resp = await client.get(
-                f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
-                headers=_admin_headers()
-            )
-            if resp.status_code == 200:
-                return resp.json()
+        client = await _get_worker_client(10)
+        resp = await client.get(
+            f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
+            headers=_admin_headers()
+        )
+        if resp.status_code == 200:
+            return resp.json()
     except Exception:
         pass
     # 回退：使用自己的 token
@@ -155,20 +176,20 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
             data = {"file_name": chunk_name}
             if caption:
                 data["caption"] = caption
-            async with httpx.AsyncClient(timeout=600, proxy=None) as client:
-                resp = await client.post(
-                    f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
-                    files=files,
-                    data=data,
-                    headers=_admin_headers(),
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    if result.get("success"):
-                        return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
-                else:
-                    body = resp.text[:200]
-                    logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
+            client = await _get_worker_client(600)
+            resp = await client.post(
+                f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
+                files=files,
+                data=data,
+                headers=_admin_headers(),
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("success"):
+                    return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
+            else:
+                body = resp.text[:200]
+                logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
         except Exception as e:
             logger.warning(f'Worker 代理上传失败，回退直连 TG: {e}')
     else:
