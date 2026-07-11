@@ -508,7 +508,9 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             if playlist_folder_id:
                                 meta['folder_id'] = playlist_folder_id
 
+                            logger.info(f'🔧 chpl: 调用 direct_upload: title={meta.get("title","?")}, category={meta.get("category")}, folder_id={meta.get("folder_id")}')
                             result = await direct_upload(meta['file_path'], meta)
+                            logger.info(f'🔧 chpl: direct_upload 返回: {result}')
                             try:
                                 os.remove(meta['file_path'])
                             except Exception:

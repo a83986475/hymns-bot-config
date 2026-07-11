@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 import httpx
 import math
@@ -6,6 +7,8 @@ import os
 import random
 import tempfile
 from config import config
+
+logger = logging.getLogger(__name__)
 
 # 分片大小：18MB
 # 实际受限于 Telegram Bot API 本地代理（telegram-bot-api）默认 20MB 上传上限，
@@ -85,6 +88,9 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
                 headers={**_admin_headers(), "Content-Type": "application/json"},
                 json=payload
             )
+    if resp.status_code != 200:
+        body = resp.text[:500]
+        logger.error(f'Worker import 失败 ({resp.status_code}): {body}')
     resp.raise_for_status()
     return resp.json()
 
