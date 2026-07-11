@@ -63,9 +63,16 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
         if resp.status_code == 200:
             data = resp.json()
             if data.get("exists"):
+                logger.info(f'去重命中: {file_name} (id={data.get("id")})')
                 return data
-    except Exception:
-        pass
+            if data.get("broken"):
+                logger.warning(f'去重检测到损坏记录（将重新上传修复）: {file_name}')
+            else:
+                logger.info(f'去重未命中: {file_name} (sha256={sha256[:12]}...)')
+        else:
+            logger.warning(f'去重 API 返回 {resp.status_code}: {resp.text[:200]}')
+    except Exception as e:
+        logger.warning(f'去重 API 请求异常（将跳过去重直接上传）: {type(e).__name__}: {e}')
     return None
 
 
