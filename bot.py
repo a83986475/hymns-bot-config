@@ -2001,13 +2001,25 @@ async def _emergency_disk_cleanup(target_bytes: int = 0, exclude_path: str = Non
 
 
 async def _start_search_server():
+    """启动 HTTP 搜索/下载服务（端口 8080，仅 bot0）。
+    禁用 aiohttp 默认 access log，避免被互联网扫描请求刷屏。
+    """
     try:
+        # 禁用默认 access log（扫描器会疯狂请求 / /login /sitemap.xml 等路径）
+        logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
+
         app = aiohttp_web.Application()
         app.router.add_get('/search', _handle_search_http)
         app.router.add_get('/download', _handle_download_http)
         app.router.add_get('/download-file', _handle_download_file_http)
         app.router.add_get('/formats', _handle_formats_http)
-        runner = aiohttp_web.AppRunner(app)
+
+        # catch-all 路由：未知路径立即返回空响应，避免不必要的事件循环开销
+        async def _catch_all(_request):
+            return aiohttp_web.Response(status=404)
+        app.router.add_route('*', '/{tail:.*}', _catch_all)
+
+        runner = aiohttp_web.AppRunner(app, access_log=None)
         await runner.setup()
         site = aiohttp_web.TCPSite(runner, '0.0.0.0', 8080)
         await site.start()
