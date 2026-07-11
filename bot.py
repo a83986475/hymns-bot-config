@@ -472,7 +472,8 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         _channel_folder_id_cache[channel_title] = channel_folder_id
                         if len(_channel_folder_id_cache) > 100:
                             # 保留当前条目，只淘汰最旧的
-                            _channel_folder_id_cache = {channel_title: channel_folder_id}
+                            _channel_folder_id_cache.clear()
+                            _channel_folder_id_cache[channel_title] = channel_folder_id
                 if channel_folder_id:
                     playlist_folder_id = await _ensure_folder(pl['title'], parent_id=channel_folder_id)
 
