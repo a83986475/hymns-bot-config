@@ -19,23 +19,21 @@ CHUNK_SIZE = 18 * 1024 * 1024
 # ── 共享 httpx 客户端（Worker API 调用）──
 # 每次 API 调用创建新客户端会导致 TCP 连接耗尽、临时端口耗尽，
 # 最终出现 ConnectError（空消息）。共享客户端复用连接池，避免此问题。
+# 注意：不设 proxy=None，让 Docker 容器使用默认网络栈。
 _worker_client: httpx.AsyncClient | None = None
 _worker_client_lock = asyncio.Lock()
 
 
 async def _get_worker_client() -> httpx.AsyncClient:
-    """获取共享的 httpx 客户端（用于 Worker API 调用，proxy=None 绕过 Clash）。
+    """获取共享的 httpx 客户端（用于 Worker API 调用）。
     各调用点通过请求级 timeout 参数控制超时，共享客户端仅负责连接池复用。
     """
     global _worker_client
     if _worker_client is None:
         async with _worker_client_lock:
             if _worker_client is None:
-                limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
                 _worker_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(600.0),  # 默认最长超时，各请求自行覆盖
-                    proxy=None,
-                    limits=limits,
                 )
     return _worker_client
 
