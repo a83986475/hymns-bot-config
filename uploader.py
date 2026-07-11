@@ -10,12 +10,11 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-# 分片大小：18MB
-# 实际受限于 Telegram Bot API 本地代理（telegram-bot-api）默认 20MB 上传上限，
-# 因此单分片不能过于接近该值。
-# 18MB 与前端本地上传的分片上限保持一致，
-# 且留出约 2MB 的 multipart/form-data 开销余量，避免因元数据导致 413 拒绝。
-CHUNK_SIZE = 18 * 1024 * 1024
+# 分片大小：4MB
+# 国内阿里云服务器通过 Clash 代理上传 TG，大 chunk 上传时间过长会被代理断连。
+# 4MB 的 chunk 上传速度更快，即使代理不稳定，每个分片的重试成本也更低。
+# 前端直接上传到网站时仍使用 18MB 分片（不受代理影响）。
+CHUNK_SIZE = 4 * 1024 * 1024
 
 
 async def refresh_jwt() -> str:
@@ -151,8 +150,7 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            # Telegram 上传直连，不经过代理（代理对大文件上传不稳定）
-            async with httpx.AsyncClient(proxy=None, timeout=600) as client:
+            async with httpx.AsyncClient(timeout=600) as client:
                 files = {field: (chunk_name, chunk_data, mime_type)}
                 resp = await client.post(url, data=data, files=files)
 
