@@ -10,11 +10,11 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-# 分片大小：4MB
-# 国内阿里云服务器通过 Clash 代理上传 TG，大 chunk 上传时间过长会被代理断连。
-# 4MB 的 chunk 上传速度更快，即使代理不稳定，每个分片的重试成本也更低。
-# 前端直接上传到网站时仍使用 18MB 分片（不受代理影响）。
-CHUNK_SIZE = 4 * 1024 * 1024
+# 分片大小：18MB
+# Bot 优先通过 Worker 代理上传 TG（Worker 直连 Telegram API），不受代理不稳定影响。
+# 兜底直连 TG 时虽走 Clash 代理，但 18MB 分片在短时网络波动时也能承受。
+# 与前端直接上传到网站的分片大小一致（前端 upload.js 也使用 18MB）。
+CHUNK_SIZE = 18 * 1024 * 1024
 
 
 async def refresh_jwt() -> str:
