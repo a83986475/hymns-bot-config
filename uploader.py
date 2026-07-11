@@ -19,15 +19,27 @@ CHUNK_SIZE = 18 * 1024 * 1024
 
 
 async def refresh_jwt() -> str:
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{config.CF_WORKER_URL}/api/admin/login",
-            json={"token": config.CF_API_KEY}
-        )
-        jwt = resp.json().get("sessionToken", "")
-        if jwt:
-            config.CF_JWT = jwt
-        return jwt
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{config.CF_WORKER_URL}/api/admin/login",
+                    json={"token": config.CF_API_KEY}
+                )
+                jwt = resp.json().get("sessionToken", "")
+                if jwt:
+                    config.CF_JWT = jwt
+                return jwt
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                logger.warning(f'JWT 刷新网络错误（{type(e).__name__}），{delay}s 后第 {attempt+2} 次重试')
+                await asyncio.sleep(delay)
+                continue
+            logger.error(f'JWT 刷新重试 {max_retries} 次后仍失败: {e}')
+            raise
+    return ""
 
 
 def _admin_headers() -> dict:
@@ -74,20 +86,29 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
         "sha256":      metadata.get("sha256"),
         "uploader_id": metadata.get("uploader_id"),
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{config.CF_WORKER_URL}/api/hymns/import",
-            headers={**_admin_headers(), "Content-Type": "application/json"},
-            json=payload
-        )
+    async def _do_import():
+        """执行 import HTTP 请求，网络错误自动重试最多 3 次。"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    return await client.post(
+                        f"{config.CF_WORKER_URL}/api/hymns/import",
+                        headers={**_admin_headers(), "Content-Type": "application/json"},
+                        json=payload
+                    )
+            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    delay = 2 ** attempt
+                    logger.warning(f'Worker import 网络错误（{type(e).__name__}），{delay}s 后第 {attempt+2} 次重试')
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+    resp = await _do_import()
     if resp.status_code == 401:
         await refresh_jwt()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{config.CF_WORKER_URL}/api/hymns/import",
-                headers={**_admin_headers(), "Content-Type": "application/json"},
-                json=payload
-            )
+        resp = await _do_import()
     if resp.status_code != 200:
         body = resp.text[:500]
         logger.error(f'Worker import 失败 ({resp.status_code}): {body}')
