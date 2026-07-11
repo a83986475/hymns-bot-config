@@ -21,7 +21,7 @@ async def refresh_jwt() -> str:
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, proxy=None) as client:
                 resp = await client.post(
                     f"{config.CF_WORKER_URL}/api/admin/login",
                     json={"token": config.CF_API_KEY}
@@ -54,7 +54,7 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
         return None
     params = {"hash": sha256, "name": file_name, "size": str(file_size)}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, proxy=None) as client:
             resp = await client.get(
                 f"{config.CF_WORKER_URL}/api/files/check-duplicate",
                 params=params,
@@ -90,7 +90,7 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with httpx.AsyncClient(timeout=30, proxy=None) as client:
                     return await client.post(
                         f"{config.CF_WORKER_URL}/api/hymns/import",
                         headers={**_admin_headers(), "Content-Type": "application/json"},
@@ -118,7 +118,7 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
 async def _get_upload_bot_token() -> dict:
     """从 Worker BotPool 获取一个上传用的 bot token（轮询分配）。返回 {token, bot_index}，失败时回退到自身。"""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, proxy=None) as client:
             resp = await client.get(
                 f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
                 headers=_admin_headers()
@@ -148,7 +148,7 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
             data = {"file_name": chunk_name}
             if caption:
                 data["caption"] = caption
-            async with httpx.AsyncClient(timeout=600) as client:
+            async with httpx.AsyncClient(timeout=600, proxy=None) as client:
                 resp = await client.post(
                     f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
                     files=files,
