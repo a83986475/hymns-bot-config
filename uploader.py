@@ -16,21 +16,30 @@ logger = logging.getLogger(__name__)
 # 与前端直接上传到网站的分片大小一致（前端 upload.js 也使用 18MB）。
 CHUNK_SIZE = 18 * 1024 * 1024
 
+# ── 共享 httpx 客户端 ──
+# 避免每次请求创建/销毁 AsyncClient，消除 PoolTimeout。
+# 连接池上限 50 个连接，应对可能的并发上传。
+# timeout=120 给 Worker 处理足够时间（含 D1 写入 + 缓存失效）。
+_SHARED_CLIENT = httpx.AsyncClient(
+    timeout=httpx.Timeout(120.0, connect=30.0),
+    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    follow_redirects=True,
+)
+
 
 async def refresh_jwt() -> str:
     """刷新 JWT。失败时返回空字符串（后续用 X-Admin-Token 兜底）。"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{config.CF_WORKER_URL}/api/admin/login",
-                    json={"token": config.CF_API_KEY}
-                )
-                jwt = resp.json().get("sessionToken", "")
-                if jwt:
-                    config.CF_JWT = jwt
-                return jwt
+            resp = await _SHARED_CLIENT.post(
+                f"{config.CF_WORKER_URL}/api/admin/login",
+                json={"token": config.CF_API_KEY}
+            )
+            jwt = resp.json().get("sessionToken", "")
+            if jwt:
+                config.CF_JWT = jwt
+            return jwt
         except Exception as e:
             if attempt < max_retries - 1:
                 delay = 2 ** attempt
@@ -54,12 +63,11 @@ async def check_duplicate(sha256: str, file_name: str, file_size: int) -> dict |
         return None
     params = {"hash": sha256, "name": file_name, "size": str(file_size)}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{config.CF_WORKER_URL}/api/check-duplicate",
-                params=params,
-                headers=_admin_headers(),
-            )
+        resp = await _SHARED_CLIENT.get(
+            f"{config.CF_WORKER_URL}/api/check-duplicate",
+            params=params,
+            headers=_admin_headers(),
+        )
         if resp.status_code == 200:
             data = resp.json()
             if data.get("exists"):
@@ -96,12 +104,11 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    return await client.post(
-                        f"{config.CF_WORKER_URL}/api/hymns/import",
-                        headers={**_admin_headers(), "Content-Type": "application/json"},
-                        json=payload
-                    )
+                return await _SHARED_CLIENT.post(
+                    f"{config.CF_WORKER_URL}/api/hymns/import",
+                    headers={**_admin_headers(), "Content-Type": "application/json"},
+                    json=payload
+                )
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
                 if attempt < max_retries - 1:
                     delay = 2 ** attempt
@@ -124,13 +131,12 @@ async def _post_import(metadata: dict, file_parts: list, file_size: int, fname: 
 async def _get_upload_bot_token() -> dict:
     """从 Worker BotPool 获取上传用 bot token，失败时回退到自身。"""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
-                headers=_admin_headers()
-            )
-            if resp.status_code == 200:
-                return resp.json()
+        resp = await _SHARED_CLIENT.get(
+            f"{config.CF_WORKER_URL}/api/bot/next-upload-token",
+            headers=_admin_headers()
+        )
+        if resp.status_code == 200:
+            return resp.json()
     except Exception:
         pass
     return {"token": config.BOT_TOKEN, "bot_index": config.BOT_INDEX}
@@ -147,20 +153,19 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
             data = {"file_name": chunk_name}
             if caption:
                 data["caption"] = caption
-            async with httpx.AsyncClient(timeout=600) as client:
-                resp = await client.post(
-                    f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
-                    files=files,
-                    data=data,
-                    headers=_admin_headers(),
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    if result.get("success"):
-                        return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
-                else:
-                    body = resp.text[:200]
-                    logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
+            resp = await _SHARED_CLIENT.post(
+                f"{config.CF_WORKER_URL}/api/bot/upload-proxy",
+                files=files,
+                data=data,
+                headers=_admin_headers(),
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("success"):
+                    return {"file_id": result["file_id"], "b": result.get("bot_index", _bot_index)}
+            else:
+                body = resp.text[:200]
+                logger.warning(f'Worker 代理上传返回 HTTP {resp.status_code}: {body}')
         except Exception as e:
             logger.warning(f'Worker 代理上传失败，回退直连 TG: {e}')
     else:
@@ -183,14 +188,12 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=600) as client:
-                files = {field: (chunk_name, chunk_data, mime_type)}
-                resp = await client.post(url, data=data, files=files)
+            files = {field: (chunk_name, chunk_data, mime_type)}
+            resp = await _SHARED_CLIENT.post(url, data=data, files=files, timeout=600.0)
 
             if resp.status_code == 429:
                 retry_after = 5 * (2 ** attempt) + random.uniform(0, 3)
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     f'TG 429 限流，{retry_after:.1f}s 后重试 (attempt {attempt+1}/{max_retries})'
                 )
                 await asyncio.sleep(retry_after)
@@ -222,8 +225,7 @@ async def _tg_upload_chunk(chunk_data: bytes, chunk_name: str, mime_type: str, i
 
         except Exception as e:
             if attempt < max_retries - 1:
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     f'分片 {chunk_name} 上传失败 (attempt {attempt+1}/{max_retries}): {e}，重试...'
                 )
                 await asyncio.sleep(2 ** attempt)

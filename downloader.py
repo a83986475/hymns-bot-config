@@ -54,6 +54,10 @@ def _base_opts() -> dict:
             'youtube': {
                 'player_client': ['web', 'mweb'],
             },
+            # 跳过播放列表认证检查——我们只提取公开信息，无需登录
+            'youtubetab': {
+                'skip': ['authcheck'],
+            },
         },
     }
     # POT provider 可选：检测到服务可用时才启用

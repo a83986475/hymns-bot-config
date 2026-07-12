@@ -317,8 +317,11 @@ async def _discover_channel_playlists(url: str, loop) -> list:
         cmd = ['yt-dlp', '--no-warnings', '--flat-playlist', '--dump-single-json', '--ignore-errors']
         if os.path.exists(COOKIE_FILE):
             cmd += ['--cookies', COOKIE_FILE]
+        # 合并 extractor-args（多个参数用逗号分隔合并为一条，否则后面的会覆盖前面的）
+        extractor_parts = ['youtubetab:skip=authcheck']
         if _pot_provider_alive():
-            cmd += ['--extractor-args', f'youtube:youtubepot-bgutilhttp=base_url={POT_PROVIDER_URL}']
+            extractor_parts.append(f'youtube:youtubepot-bgutilhttp=base_url={POT_PROVIDER_URL}')
+        cmd += ['--extractor-args', ','.join(extractor_parts)]
         cmd.append(playlists_url)
         r = _sp.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if r.returncode != 0:
@@ -528,7 +531,7 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         cancelled = True
                         break
 
-                    MAX_RETRIES = 1
+                    MAX_RETRIES = 2
                     for attempt in range(MAX_RETRIES + 1):
                         try:
                             if attempt > 0:
@@ -645,7 +648,7 @@ async def callback_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 cancelled = True
                 break
 
-            MAX_RETRIES = 1
+            MAX_RETRIES = 2
             for attempt in range(MAX_RETRIES + 1):
                 try:
                     if attempt > 0:
